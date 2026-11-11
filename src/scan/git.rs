@@ -41,12 +41,17 @@ pub fn scan_git_history(
         cmd.arg(format!("--max-count={max}"));
     }
 
-    let output = match cmd.output() {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return Ok(Vec::new()),
-    };
+    let output = cmd
+        .output()
+        .context("failed to execute git command for history scan")?;
 
-    Ok(parse_git_diff_output(&output, scanner, allowlist, false))
+    if !output.status.success() {
+        let err_msg = String::from_utf8_lossy(&output.stderr);
+        bail!("git log failed: {}", err_msg.trim());
+    }
+
+    let diff_text = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_git_diff_output(&diff_text, scanner, allowlist, false))
 }
 
 /// Scan only staged changes (e.g. for pre-commit hook)

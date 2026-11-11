@@ -1,4 +1,4 @@
-# Asur v1.0.0
+# Asur v1.0.1
 
 > One fast, single-binary CLI for everyday local dev — spin up containers, resolve port conflicts, sync `.env` files, and catch leaked secrets.
 
@@ -65,8 +65,8 @@ asur ignore
 | `asur logs [container]` | Pick a container and stream its logs |
 | `asur sh [container]` | Open a shell inside a container |
 | `asur db [container]` | Connect to a database via native client |
-| `asur clean` | Remove unused containers, images, volumes |
-| `asur port <n>` | See what is using a port; offer to kill it |
+| `asur clean` | Remove unused containers and images (`--dry-run` to preview, `-v` for volumes) |
+| `asur port <n>` | Inspect who is using a port (use `-k / --kill` to terminate) |
 | `asur port free <n>` | Find the next free port at or above `n` |
 | `asur env example` | Generate `.env.example` from `.env` |
 | `asur env diff` | Show missing/extra keys between env files |

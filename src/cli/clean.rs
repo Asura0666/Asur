@@ -11,9 +11,15 @@ use crate::ui;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct CleanArgs {
-    /// Skip the confirmation prompt
+    /// Skip confirmation prompts and proceed with cleanup
     #[arg(short, long)]
     pub yes: bool,
+    /// Include unused volumes for deletion (warning: irreversible data loss)
+    #[arg(short, long)]
+    pub volumes: bool,
+    /// Preview reclaimable resources without deleting anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 pub async fn run(args: CleanArgs) -> Result<()> {
@@ -73,6 +79,20 @@ pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Resul
         space_styled.if_supports_color(Stream::Stdout, |t| t.style(cyan_bold))
     );
 
+    // 1. Dry run guard: preview only, never delete
+    if args.dry_run {
+        ui::info("[dry-run] Preview only. No resources were deleted.");
+        return Ok(());
+    }
+
+    // 2. Non-interactive safety guard: require explicit --yes in scripts / CI
+    if !is_interactive && !args.yes {
+        ui::warn(
+            "Non-interactive terminal detected: pass `--yes` to authorize deletion, or `--dry-run` to inspect.",
+        );
+        return Ok(());
+    }
+
     // Build selectable options
     // Format: "[C] name (size)", "[I] tag (size)", "[V] name (size)"
     let mut options = Vec::new();
@@ -117,9 +137,33 @@ pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Resul
         }
         indices
     } else {
-        // Non-interactive or --yes: select all
-        (0..options.len()).collect()
+        // Non-interactive with --yes, or interactive with --yes:
+        // Always select containers and images.
+        // VOLUMES ARE ONLY SELECTED IF EXPLICITLY REQUESTED WITH --volumes / -v!
+        let mut indices = Vec::new();
+        for (i, (kind, _, _)) in item_meta.iter().enumerate() {
+            if *kind == 'V' {
+                if args.volumes {
+                    indices.push(i);
+                }
+            } else {
+                indices.push(i);
+            }
+        }
+
+        if !report.unused_volumes.is_empty() && !args.volumes {
+            ui::info(
+                "Volumes were excluded from automated cleanup. Pass `-v` or `--volumes` to include them.",
+            );
+        }
+
+        indices
     };
+
+    if selected_indices.is_empty() {
+        ui::info("No matching items to clean.");
+        return Ok(());
+    }
 
     let mut container_ids = Vec::new();
     let mut image_ids = Vec::new();
@@ -137,7 +181,7 @@ pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Resul
         }
     }
 
-    // Confirmation prompt
+    // Confirmation prompt in interactive mode
     if !args.yes && is_interactive {
         if !volume_names.is_empty() {
             ui::warn(

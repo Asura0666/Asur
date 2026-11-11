@@ -6,6 +6,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.0.1] – 2026-11-12
+
+### Fixed & Security Hardening (Production Readiness Audit)
+
+- **Docker Volume Protection (`asur clean`)**:
+  - `asur clean` in non-interactive / scripted environments now requires explicit `--yes` to proceed and never executes silent deletions.
+  - Docker volumes are now strictly protected: automated cleanup will **never** delete volumes unless `-v / --volumes` is explicitly passed alongside `--yes`.
+  - Added `--dry-run` flag to inspect cleanable resources without touching disk.
+- **Safe Port Inspection (`asur port`)**:
+  - `asur port <n>` is now strictly inspection-only by default. It will never terminate processes or stop containers without the explicit `-k / --kill` flag.
+  - In non-interactive environments, `--kill` requires `--yes` to prevent accidental termination in CI/scripts.
+- **Secret Scanner Reliability & Error Transparency (`asur scan`)**:
+  - Scanner no longer silently ignores read errors or large files. Skipped files (>1 MB limit or read errors) are explicitly reported in human output and JSON.
+  - Distinguishes between clean scans, partial coverage with skipped files, and findings.
+  - Git history scanning errors are now explicitly reported instead of silently returning empty findings.
+- **Predictable `.asurignore` Glob Matching**:
+  - Replaced loose substring matching with predictable gitignore-style glob pattern matching (`fixtures/`, `*.test.ts`, `tests/**/*.key`).
+  - Prevents false-positive ignore matches on unrelated files.
+- **Robust `.env` Parsing**:
+  - Added support for multiline values (e.g. RSA private keys and SSL certificates).
+  - Fixed escaped quotes (`\"`) inside quoted values so strings are not truncated prematurely.
+  - Fixed inline comment parsing to require whitespace before `#` in unquoted values (allowing `#` in URLs and fragments).
+- **Automated SHA256 Checksums**:
+  - Release pipeline now generates and publishes `.sha256` checksum files alongside Windows, macOS, and Linux release binaries.
+
+---
+
 ## [1.0.0] – 2026-11-11
 
 ### Added

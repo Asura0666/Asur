@@ -18,7 +18,10 @@ use crate::util::ports::{extract_docker_ports, find_available_port, is_port_free
 pub struct PortArgs {
     /// Port to inspect
     pub port: Option<u16>,
-    /// Kill without asking
+    /// Terminate the process or stop the container using the port
+    #[arg(short, long)]
+    pub kill: bool,
+    /// Skip confirmation prompt when killing/stopping
     #[arg(short, long)]
     pub yes: bool,
     #[command(subcommand)]
@@ -54,7 +57,7 @@ pub async fn execute<R: ContainerRuntime>(args: PortArgs, runtime: Option<&R>) -
         (Some(PortCommand::Free { start, copy }), _) => {
             handle_port_free(start, copy, runtime).await
         }
-        (None, Some(port)) => handle_port_inspect(port, args.yes, runtime).await,
+        (None, Some(port)) => handle_port_inspect(port, args.kill, args.yes, runtime).await,
         (None, None) => {
             bail!("give a port to inspect (e.g. `asur port 3000`) or use `asur port free 3000`");
         }
@@ -100,6 +103,7 @@ async fn handle_port_free<R: ContainerRuntime>(
 /// Inspect who is using a port (Docker container or OS process) and offer to stop/kill.
 async fn handle_port_inspect<R: ContainerRuntime>(
     port: u16,
+    kill: bool,
     yes: bool,
     runtime: Option<&R>,
 ) -> Result<()> {
@@ -133,8 +137,18 @@ async fn handle_port_inspect<R: ContainerRuntime>(
         println!("  Image    : {image}");
         println!("  Status   : {status}\n");
 
-        let should_stop = if yes || !is_interactive {
+        if !kill {
+            println!("  › To stop this container, run: `asur port {port} --kill`");
+            return Ok(());
+        }
+
+        let should_stop = if yes {
             true
+        } else if !is_interactive {
+            ui::warn(
+                "Non-interactive terminal detected: pass `--yes` with `--kill` to authorize stopping the container.",
+            );
+            false
         } else {
             inquire::Confirm::new(&format!(
                 "Stop Docker container `{container_name}` to free port {port}?"
@@ -181,8 +195,18 @@ async fn handle_port_inspect<R: ContainerRuntime>(
         }
         println!();
 
-        let should_kill = if yes || !is_interactive {
+        if !kill {
+            println!("  › To terminate this process, run: `asur port {port} --kill`");
+            return Ok(());
+        }
+
+        let should_kill = if yes {
             true
+        } else if !is_interactive {
+            ui::warn(
+                "Non-interactive terminal detected: pass `--yes` with `--kill` to authorize terminating the process.",
+            );
+            false
         } else {
             inquire::Confirm::new(&format!(
                 "Kill process `{}` (PID {}) to free port {port}?",

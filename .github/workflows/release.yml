@@ -58,7 +58,20 @@ jobs:
             -Path "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" `
             -DestinationPath "${{ matrix.asset_name }}"
 
+      - name: Generate SHA256 checksum (Unix)
+        if: runner.os != 'Windows'
+        run: shasum -a 256 ${{ matrix.asset_name }} > ${{ matrix.asset_name }}.sha256
+
+      - name: Generate SHA256 checksum (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Path ${{ matrix.asset_name }} -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ matrix.asset_name }}" | Out-File -Encoding ascii "${{ matrix.asset_name }}.sha256"
+
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset_name }}
+          files: |
+            ${{ matrix.asset_name }}
+            ${{ matrix.asset_name }}.sha256

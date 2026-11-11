@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use clap::Args;
 use owo_colors::{OwoColorize, Stream, Style};
+use serde::Serialize;
 use tabled::{Table, Tabled, settings::Style as TableStyle};
 
 use crate::scan::{
-    Allowlist, Finding, SecretScanner, install_pre_commit_hook, is_git_repo, scan_git_history,
-    scan_staged_changes, scan_working_tree,
+    Allowlist, Finding, SecretScanner, SkippedFile, install_pre_commit_hook, is_git_repo,
+    scan_git_history, scan_staged_changes, scan_working_tree,
 };
 use crate::ui;
 
@@ -46,6 +47,16 @@ struct FindingRow {
     masked: String,
 }
 
+#[derive(Serialize)]
+struct ScanJsonReport {
+    status: String,
+    files_scanned: usize,
+    findings: Vec<Finding>,
+    skipped_files: Vec<SkippedFile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_warning: Option<String>,
+}
+
 pub async fn run(args: ScanArgs) -> Result<()> {
     let scan_dir = if args.path.is_relative() {
         std::env::current_dir()?.join(&args.path)
@@ -75,29 +86,53 @@ pub async fn run(args: ScanArgs) -> Result<()> {
 
     let scanner = SecretScanner::new();
     let mut findings: Vec<Finding> = Vec::new();
+    let mut skipped_files: Vec<SkippedFile> = Vec::new();
+    let mut files_scanned = 0usize;
+    let mut git_warning: Option<String> = None;
 
     // 3. Perform scan
     if args.staged {
         findings = scan_staged_changes(&scan_dir, &scanner, &allowlist)?;
     } else {
-        // Scan working tree
-        let wt_findings = scan_working_tree(&scan_dir, &scanner, &allowlist)?;
-        findings.extend(wt_findings);
+        let wt_report = scan_working_tree(&scan_dir, &scanner, &allowlist)?;
+        files_scanned = wt_report.files_scanned;
+        findings.extend(wt_report.findings);
+        skipped_files.extend(wt_report.skipped_files);
 
         // Scan git history if inside git repository and not disabled
         if !args.no_history && is_git_repo(&scan_dir) {
-            if let Ok(history_findings) =
-                scan_git_history(&scan_dir, &scanner, &allowlist, Some(200))
-            {
-                findings.extend(history_findings);
+            match scan_git_history(&scan_dir, &scanner, &allowlist, Some(200)) {
+                Ok(history_findings) => findings.extend(history_findings),
+                Err(err) => {
+                    git_warning = Some(format!("Git history scan could not be completed: {err}"));
+                }
             }
         }
     }
 
+    let has_incomplete_coverage = !skipped_files.is_empty() || git_warning.is_some();
+
     // 4. Handle JSON output
     if args.json {
-        let json_str = serde_json::to_string_pretty(&findings)?;
+        let status = if !findings.is_empty() {
+            "secrets_found"
+        } else if has_incomplete_coverage {
+            "partial_clean"
+        } else {
+            "clean"
+        };
+
+        let report = ScanJsonReport {
+            status: status.to_string(),
+            files_scanned,
+            findings: findings.clone(),
+            skipped_files,
+            git_warning,
+        };
+
+        let json_str = serde_json::to_string_pretty(&report)?;
         println!("{json_str}");
+
         if !findings.is_empty() {
             bail!(
                 "Secrets detected during scan ({} finding(s))",
@@ -110,12 +145,44 @@ pub async fn run(args: ScanArgs) -> Result<()> {
     // 5. Human-friendly output
     let ok_style = Style::new().green().bold();
     let err_style = Style::new().red().bold();
+    let warn_style = Style::new().yellow().bold();
+
+    // Display skipped files or warnings upfront
+    if let Some(ref warn_msg) = git_warning {
+        ui::warn(warn_msg);
+    }
+
+    if !skipped_files.is_empty() {
+        ui::warn(&format!(
+            "{} file(s) were skipped during scan:",
+            skipped_files.len()
+        ));
+        for (i, sf) in skipped_files.iter().enumerate() {
+            if i >= 10 {
+                println!(
+                    "    ... and {} more skipped file(s)",
+                    skipped_files.len() - 10
+                );
+                break;
+            }
+            println!("    • {} ({})", sf.path, sf.reason);
+        }
+        println!();
+    }
 
     if findings.is_empty() {
-        println!(
-            "{} No secrets detected.",
-            "✔".if_supports_color(Stream::Stdout, |t| t.style(ok_style))
-        );
+        if has_incomplete_coverage {
+            println!(
+                "{} No secrets detected in scanned files, but coverage was incomplete due to skipped files or git errors.",
+                "⚠".if_supports_color(Stream::Stdout, |t| t.style(warn_style))
+            );
+        } else {
+            println!(
+                "{} Scan complete. No secrets detected ({} file(s) scanned).",
+                "✔".if_supports_color(Stream::Stdout, |t| t.style(ok_style)),
+                files_scanned
+            );
+        }
         return Ok(());
     }
 
@@ -145,7 +212,6 @@ pub async fn run(args: ScanArgs) -> Result<()> {
     println!("{table}\n");
 
     // Warnings and remediation
-    let warn_style = Style::new().yellow().bold();
     println!(
         "{} Remediation steps:",
         "›".if_supports_color(Stream::Stdout, |t| t.cyan())

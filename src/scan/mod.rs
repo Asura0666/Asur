@@ -12,4 +12,6 @@ pub use git::{install_pre_commit_hook, is_git_repo, scan_git_history, scan_stage
 #[allow(unused_imports)]
 pub use mask::mask_secret;
 pub use rules::{Finding, SecretScanner};
-pub use walker::scan_working_tree;
+#[allow(unused_imports)]
+pub use walker::WorkingTreeReport;
+pub use walker::{SkippedFile, scan_working_tree};
