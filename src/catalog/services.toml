@@ -1,0 +1,128 @@
+# Built-in service catalog. Adding a service means adding an entry here, not code.
+# Placeholders in `connection`: {user} {password} {port} {database}
+
+[[service]]
+name = "postgres"
+aliases = ["postgresql", "pg"]
+image = "postgres"
+default_tag = "16-alpine"
+default_port = 5432
+data_path = "/var/lib/postgresql/data"
+user_env = "POSTGRES_USER"
+password_env = "POSTGRES_PASSWORD"
+database_env = "POSTGRES_DB"
+default_user = "postgres"
+default_database = "app"
+connection = "postgres://{user}:{password}@localhost:{port}/{database}"
+client = ["psql"]
+
+[[service]]
+name = "redis"
+aliases = ["valkey"]
+image = "redis"
+default_tag = "7-alpine"
+default_port = 6379
+data_path = "/data"
+command = ["redis-server", "--requirepass", "{password}"]
+connection = "redis://:{password}@localhost:{port}"
+client = ["redis-cli"]
+
+[[service]]
+name = "mysql"
+image = "mysql"
+default_tag = "8.4"
+default_port = 3306
+data_path = "/var/lib/mysql"
+password_env = "MYSQL_ROOT_PASSWORD"
+database_env = "MYSQL_DATABASE"
+default_user = "root"
+default_database = "app"
+connection = "mysql://{user}:{password}@localhost:{port}/{database}"
+client = ["mysql"]
+
+[[service]]
+name = "mariadb"
+image = "mariadb"
+default_tag = "11"
+default_port = 3306
+data_path = "/var/lib/mysql"
+password_env = "MARIADB_ROOT_PASSWORD"
+database_env = "MARIADB_DATABASE"
+default_user = "root"
+default_database = "app"
+connection = "mysql://{user}:{password}@localhost:{port}/{database}"
+client = ["mariadb"]
+
+[[service]]
+name = "mongodb"
+aliases = ["mongo"]
+image = "mongo"
+default_tag = "7"
+default_port = 27017
+data_path = "/data/db"
+user_env = "MONGO_INITDB_ROOT_USERNAME"
+password_env = "MONGO_INITDB_ROOT_PASSWORD"
+database_env = "MONGO_INITDB_DATABASE"
+default_user = "admin"
+default_database = "app"
+connection = "mongodb://{user}:{password}@localhost:{port}/{database}?authSource=admin"
+client = ["mongosh"]
+
+[[service]]
+name = "rabbitmq"
+aliases = ["rabbit"]
+image = "rabbitmq"
+default_tag = "3-management-alpine"
+default_port = 5672
+data_path = "/var/lib/rabbitmq"
+user_env = "RABBITMQ_DEFAULT_USER"
+password_env = "RABBITMQ_DEFAULT_PASS"
+default_user = "guest"
+connection = "amqp://{user}:{password}@localhost:{port}"
+client = ["rabbitmqadmin"]
+
+[[service]]
+name = "minio"
+aliases = ["s3"]
+image = "minio/minio"
+default_tag = "latest"
+default_port = 9000
+data_path = "/data"
+command = ["server", "/data", "--console-address", ":9001"]
+user_env = "MINIO_ROOT_USER"
+password_env = "MINIO_ROOT_PASSWORD"
+default_user = "minioadmin"
+connection = "http://{user}:{password}@localhost:{port}"
+client = ["mc"]
+
+[[service]]
+name = "kafka"
+image = "apache/kafka"
+default_tag = "latest"
+default_port = 9092
+data_path = "/tmp/kraft-combined-logs"
+extra_env = [
+    "KAFKA_NODE_ID=1",
+    "KAFKA_PROCESS_ROLES=broker,controller",
+    "KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093",
+    "KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092",
+    "KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER",
+    "KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093",
+    "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1"
+]
+connection = "localhost:{port}"
+client = ["kafka-console-producer.sh"]
+
+[[service]]
+name = "elasticsearch"
+aliases = ["elastic", "es"]
+image = "elasticsearch"
+default_tag = "8.13.0"
+default_port = 9200
+data_path = "/usr/share/elasticsearch/data"
+extra_env = [
+    "discovery.type=single-node",
+    "xpack.security.enabled=false"
+]
+connection = "http://localhost:{port}"
+client = ["curl"]

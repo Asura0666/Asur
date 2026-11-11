@@ -1,0 +1,38 @@
+[package]
+name = "asur"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "One CLI for everyday local dev: containers, ports, .env files and leaked secrets."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/Asura0666/Asur"
+homepage = "https://github.com/Asura0666/Asur"
+keywords = ["cli", "docker", "developer-tools", "env", "secrets"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1.0.104"
+arboard = "3.4"
+bollard = "0.18"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+clap_complete = "4.6.11"
+futures-util = "0.3"
+inquire = "0.7"
+owo-colors = { version = "4.4.0", features = ["supports-colors"] }
+rand = "0.8"
+regex = "1.12"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+strsim = "0.11"
+tabled = { version = "0.17", features = ["ansi"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "process", "time", "signal"] }
+toml = "1.2.1"
+
+# Small, fast single binary for releases.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

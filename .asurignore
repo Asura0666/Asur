@@ -1,0 +1,7 @@
+# Asur secret scanner allowlist
+# Test cases and mock fixtures
+src/scan/rules.rs
+src/scan/walker.rs
+src/scan/git.rs
+src/scan/mask.rs
+
