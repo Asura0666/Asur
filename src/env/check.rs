@@ -141,4 +141,3 @@ DEBUG=invalid_bool
         assert_eq!(errors[1].key, "DEBUG");
     }
 }
-

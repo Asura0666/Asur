@@ -65,4 +65,3 @@ mod tests {
         assert!(!allow.is_path_ignored(Path::new("src/auth.ts")));
     }
 }
-

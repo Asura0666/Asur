@@ -58,4 +58,3 @@ mod tests {
         assert_eq!(report.extra_in_env, vec!["EXTRA"]);
     }
 }
-

@@ -70,4 +70,3 @@ DATABASE_URL=postgres://root:pass@localhost/db # db connection
         assert!(!example.contains("pass@localhost"));
     }
 }
-
