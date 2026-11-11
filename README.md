@@ -13,8 +13,7 @@ Go to [**Releases**](https://github.com/Asura0666/Asur/releases/latest) and down
 | Platform | File |
 |---|---|
 | Windows x86-64 | `asur-windows-x86_64.zip` |
-| macOS Apple Silicon | `asur-macos-arm64.tar.gz` |
-| macOS Intel | `asur-macos-x86_64.tar.gz` |
+| macOS (Apple Silicon M1/M2/M3/M4) | `asur-macos-arm64.tar.gz` |
 | Linux x86-64 | `asur-linux-x86_64.tar.gz` |
 
 Extract and place `asur` / `asur.exe` somewhere in your `PATH`.
