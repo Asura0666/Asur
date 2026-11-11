@@ -6,16 +6,92 @@ use anyhow::{Context, Result, bail};
 use super::allowlist::Allowlist;
 use super::rules::{Finding, SecretScanner};
 
-/// Check if directory is inside a git repository
-pub fn is_git_repo(path: &Path) -> bool {
-    Command::new("git")
+/// Status of git repository detection
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitRepoStatus {
+    /// Inside a valid git work tree
+    InsideWorkTree,
+    /// Directory is not a git repository
+    NotGitRepo,
+    /// Git repository marker detected, but git executable or command failed
+    GitUnavailable(String),
+}
+
+/// Helper to check if `.git` directory or file exists in path
+pub fn has_git_marker(dir: &Path) -> bool {
+    dir.join(".git").exists()
+}
+
+/// Check the status of a git repository at the given path
+pub fn check_git_repo_status(path: &Path) -> GitRepoStatus {
+    let mut cmd = Command::new("git");
+    cmd.env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+
+    // Protect against accidentally treating ancestor home or temp directories as git repositories
+    let mut ceilings = Vec::new();
+    if let Ok(existing) = std::env::var("GIT_CEILING_DIRECTORIES") {
+        if !existing.is_empty() {
+            ceilings.push(existing);
+        }
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        let home_path = PathBuf::from(&home);
+        if path != home_path && !path.join(".git").exists() {
+            ceilings.push(home_path.to_string_lossy().to_string());
+        }
+    }
+    let temp = std::env::temp_dir();
+    if path != temp && !path.join(".git").exists() {
+        ceilings.push(temp.to_string_lossy().to_string());
+    }
+
+    if !ceilings.is_empty() {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        cmd.env("GIT_CEILING_DIRECTORIES", ceilings.join(sep));
+    }
+
+    match cmd
         .arg("-C")
         .arg(path)
         .arg("rev-parse")
         .arg("--is-inside-work-tree")
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    {
+        Ok(out) => {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if stdout.trim() == "true" {
+                    GitRepoStatus::InsideWorkTree
+                } else {
+                    GitRepoStatus::NotGitRepo
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if stderr.contains("not a git repository") {
+                    GitRepoStatus::NotGitRepo
+                } else {
+                    GitRepoStatus::GitUnavailable(format!("git command failed: {}", stderr.trim()))
+                }
+            }
+        }
+        Err(e) => {
+            if has_git_marker(path) {
+                GitRepoStatus::GitUnavailable(format!(
+                    "git repository detected, but git executable failed: {e}"
+                ))
+            } else {
+                GitRepoStatus::NotGitRepo
+            }
+        }
+    }
+}
+
+/// Check if directory is inside a git repository
+#[allow(dead_code)]
+pub fn is_git_repo(path: &Path) -> bool {
+    matches!(check_git_repo_status(path), GitRepoStatus::InsideWorkTree)
 }
 
 /// Scan git commit history for secrets in commits
@@ -25,12 +101,17 @@ pub fn scan_git_history(
     allowlist: &Allowlist,
     max_commits: Option<usize>,
 ) -> Result<Vec<Finding>> {
-    if !is_git_repo(repo_root) {
-        return Ok(Vec::new());
+    match check_git_repo_status(repo_root) {
+        GitRepoStatus::InsideWorkTree => {}
+        GitRepoStatus::NotGitRepo => return Ok(Vec::new()),
+        GitRepoStatus::GitUnavailable(err) => bail!("{err}"),
     }
 
     let mut cmd = Command::new("git");
-    cmd.arg("-C")
+    cmd.env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .arg("-C")
         .arg(repo_root)
         .arg("log")
         .arg("-p")
@@ -60,8 +141,10 @@ pub fn scan_staged_changes(
     scanner: &SecretScanner,
     allowlist: &Allowlist,
 ) -> Result<Vec<Finding>> {
-    if !is_git_repo(repo_root) {
-        return Ok(Vec::new());
+    match check_git_repo_status(repo_root) {
+        GitRepoStatus::InsideWorkTree => {}
+        GitRepoStatus::NotGitRepo => return Ok(Vec::new()),
+        GitRepoStatus::GitUnavailable(err) => bail!("{err}"),
     }
 
     let output = Command::new("git")
@@ -144,6 +227,9 @@ fn parse_git_diff_output(
 /// Find git hooks directory for a repo
 fn get_hooks_dir(repo_root: &Path) -> Result<PathBuf> {
     let output = Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .arg("-C")
         .arg(repo_root)
         .arg("rev-parse")
@@ -168,8 +254,10 @@ fn get_hooks_dir(repo_root: &Path) -> Result<PathBuf> {
 
 /// Installs a pre-commit hook that runs `asur scan --staged`
 pub fn install_pre_commit_hook(repo_root: &Path) -> Result<PathBuf> {
-    if !is_git_repo(repo_root) {
-        bail!("`{}` is not a git repository", repo_root.display());
+    match check_git_repo_status(repo_root) {
+        GitRepoStatus::InsideWorkTree => {}
+        GitRepoStatus::NotGitRepo => bail!("`{}` is not a git repository", repo_root.display()),
+        GitRepoStatus::GitUnavailable(err) => bail!("git is unavailable or failed: {err}"),
     }
 
     let hooks_dir = get_hooks_dir(repo_root)?;
@@ -241,5 +329,31 @@ index 0000000..1111111 100644
         assert_eq!(findings[0].file, "config.json");
         assert_eq!(findings[0].rule, "AWS Access Key ID");
         assert_eq!(findings[0].commit.as_deref(), Some("3a4b5c6d"));
+    }
+
+    #[test]
+    fn test_has_git_marker() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("asur_test_git_marker_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        assert!(!has_git_marker(&temp_dir));
+
+        let git_dir = temp_dir.join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        assert!(has_git_marker(&temp_dir));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_check_git_repo_status_non_git() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("asur_test_non_git_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let status = check_git_repo_status(&temp_dir);
+        assert_eq!(status, GitRepoStatus::NotGitRepo);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

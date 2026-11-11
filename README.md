@@ -1,4 +1,4 @@
-# Asur v1.0.1
+# Asur v1.0.2
 
 > One fast, single-binary CLI for everyday local dev — spin up containers, resolve port conflicts, sync `.env` files, and catch leaked secrets.
 
@@ -61,7 +61,7 @@ asur ignore
 |---|---|
 | `asur up <service...>` | Spin up containers with an interactive wizard |
 | `asur ps` | List containers in a readable table |
-| `asur down [containers...]` | Stop and remove containers |
+| `asur down [containers...]` | Stop and remove containers (`-y / --yes` in scripts, `-v` for volumes) |
 | `asur logs [container]` | Pick a container and stream its logs |
 | `asur sh [container]` | Open a shell inside a container |
 | `asur db [container]` | Connect to a database via native client |
@@ -72,7 +72,7 @@ asur ignore
 | `asur env diff` | Show missing/extra keys between env files |
 | `asur env check` | Validate required keys and value types |
 | `asur env hook` | Block `.env` commits with a git pre-commit hook |
-| `asur scan` | Scan for leaked secrets in files and git history |
+| `asur scan` | Scan for leaked secrets in files and git history (`--allow-partial` for CI) |
 | `asur scan --install-hook` | Block secret commits with a pre-commit hook |
 | `asur ignore` | Add `.gitignore` / `.dockerignore` entries |
 | `asur completions <shell>` | Print tab-completion script |

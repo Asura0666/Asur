@@ -8,7 +8,12 @@ pub mod walker;
 pub use allowlist::Allowlist;
 #[allow(unused_imports)]
 pub use entropy::shannon_entropy;
-pub use git::{install_pre_commit_hook, is_git_repo, scan_git_history, scan_staged_changes};
+#[allow(unused_imports)]
+pub use git::is_git_repo;
+pub use git::{
+    GitRepoStatus, check_git_repo_status, install_pre_commit_hook, scan_git_history,
+    scan_staged_changes,
+};
 #[allow(unused_imports)]
 pub use mask::mask_secret;
 pub use rules::{Finding, SecretScanner};

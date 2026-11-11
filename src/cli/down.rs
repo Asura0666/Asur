@@ -26,11 +26,15 @@ pub struct DownArgs {
 
 pub async fn run(args: DownArgs) -> Result<()> {
     let runtime = DockerRuntime::connect()?;
-    execute(args, &runtime).await
+    let is_interactive = std::io::stdin().is_terminal();
+    execute(args, &runtime, is_interactive).await
 }
 
-pub async fn execute<R: ContainerRuntime>(args: DownArgs, runtime: &R) -> Result<()> {
-    let is_interactive = std::io::stdin().is_terminal();
+pub async fn execute<R: ContainerRuntime>(
+    args: DownArgs,
+    runtime: &R,
+    is_interactive: bool,
+) -> Result<()> {
     let all_containers = runtime.list_containers(true).await?;
 
     if all_containers.is_empty() {
@@ -55,8 +59,22 @@ pub async fn execute<R: ContainerRuntime>(args: DownArgs, runtime: &R) -> Result
         return Ok(());
     }
 
+    // Non-interactive safety guard: require --yes before stopping or removing
+    if !is_interactive && !args.yes {
+        ui::warn(
+            "Non-interactive terminal detected: pass `--yes` (`-y`) to authorize stopping/removing containers.",
+        );
+        return Ok(());
+    }
+
     // Confirmation prompt (if not --yes and in interactive mode)
     if !args.yes && is_interactive {
+        if args.volumes {
+            ui::warn(
+                "⚠️  Volume deletion is irreversible! All data inside attached volumes will be permanently lost.",
+            );
+        }
+
         let action_desc = if args.stop_only {
             format!("Stop {} container(s)", targets.len())
         } else if args.volumes {
@@ -258,7 +276,7 @@ mod tests {
             yes: true,
         };
 
-        execute(args, &fake).await.unwrap();
+        execute(args, &fake, false).await.unwrap();
 
         assert_eq!(*fake.stopped.lock().unwrap(), vec!["redis-1"]);
         assert_eq!(
@@ -277,7 +295,7 @@ mod tests {
             yes: true,
         };
 
-        execute(args, &fake).await.unwrap();
+        execute(args, &fake, false).await.unwrap();
 
         assert_eq!(*fake.stopped.lock().unwrap(), vec!["postgres-1"]);
         assert!(fake.removed.lock().unwrap().is_empty());
@@ -293,7 +311,7 @@ mod tests {
             yes: true,
         };
 
-        execute(args, &fake).await.unwrap();
+        execute(args, &fake, false).await.unwrap();
 
         assert_eq!(
             *fake.removed.lock().unwrap(),
@@ -311,7 +329,24 @@ mod tests {
             yes: true,
         };
 
-        let result = execute(args, &fake).await;
+        let result = execute(args, &fake, false).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_down_non_interactive_without_yes_guards() {
+        let fake = FakeDownRuntime::new(sample_running_containers());
+        let args = DownArgs {
+            containers: vec!["redis-1".into()],
+            stop_only: false,
+            volumes: false,
+            yes: false,
+        };
+
+        // When non-interactive and yes is false, it must guard and do nothing
+        let result = execute(args, &fake, false).await;
+        assert!(result.is_ok());
+        assert!(fake.stopped.lock().unwrap().is_empty());
+        assert!(fake.removed.lock().unwrap().is_empty());
     }
 }

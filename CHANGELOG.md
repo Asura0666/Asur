@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.0.2] – 2026-11-12
+
+### Fixed & Security Hardening (Post-Audit Hardening)
+
+- **Non-Interactive Container Removal Guard (`asur down`)**:
+  - Enforced a non-interactive safety guard: scripts and CI environments must explicitly supply `--yes` (`-y`) to stop or remove containers, preventing accidental data or service loss during non-interactive runs.
+  - Added warnings when `--volumes` (`-v`) is combined with removal in both interactive and automated contexts.
+- **Fail-Safe Secret Scanner Coverage (`asur scan`)**:
+  - `asur scan` now fails with a non-zero exit code if coverage is incomplete (files skipped due to the 1 MB limit, unreadable files, or inaccessible git history).
+  - Added `--allow-partial` flag for workflows that intentionally wish to accept partial scans as success.
+  - Both CLI exit status and JSON output (`status: "partial_clean"`) reflect incomplete coverage so CI pipelines never report false confidence.
+- **Accurate Git Repository & Tool Diagnostics**:
+  - Distinguishes between "not a git repository" and "git executable or repository operation failed".
+  - Fails transparently with actionable diagnostics when git history is requested but git is unavailable or errors.
+
+---
+
 ## [1.0.1] – 2026-11-12
 
 ### Fixed & Security Hardening (Production Readiness Audit)

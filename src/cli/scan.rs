@@ -10,8 +10,8 @@ use serde::Serialize;
 use tabled::{Table, Tabled, settings::Style as TableStyle};
 
 use crate::scan::{
-    Allowlist, Finding, SecretScanner, SkippedFile, install_pre_commit_hook, is_git_repo,
-    scan_git_history, scan_staged_changes, scan_working_tree,
+    Allowlist, Finding, GitRepoStatus, SecretScanner, SkippedFile, check_git_repo_status,
+    install_pre_commit_hook, scan_git_history, scan_staged_changes, scan_working_tree,
 };
 use crate::ui;
 
@@ -32,6 +32,9 @@ pub struct ScanArgs {
     /// Output findings in JSON format
     #[arg(long)]
     pub json: bool,
+    /// Allow partial scan to succeed (exit code 0) even if files were skipped or git history could not be verified
+    #[arg(long)]
+    pub allow_partial: bool,
     /// Automatically accept remediation offers (e.g. adding leaked files to .gitignore)
     #[arg(short, long)]
     pub yes: bool,
@@ -100,11 +103,22 @@ pub async fn run(args: ScanArgs) -> Result<()> {
         skipped_files.extend(wt_report.skipped_files);
 
         // Scan git history if inside git repository and not disabled
-        if !args.no_history && is_git_repo(&scan_dir) {
-            match scan_git_history(&scan_dir, &scanner, &allowlist, Some(200)) {
-                Ok(history_findings) => findings.extend(history_findings),
-                Err(err) => {
-                    git_warning = Some(format!("Git history scan could not be completed: {err}"));
+        if !args.no_history {
+            match check_git_repo_status(&scan_dir) {
+                GitRepoStatus::InsideWorkTree => {
+                    match scan_git_history(&scan_dir, &scanner, &allowlist, Some(200)) {
+                        Ok(history_findings) => findings.extend(history_findings),
+                        Err(err) => {
+                            git_warning =
+                                Some(format!("Git history scan could not be completed: {err}"));
+                        }
+                    }
+                }
+                GitRepoStatus::GitUnavailable(reason) => {
+                    git_warning = Some(format!("Git history could not be verified: {reason}"));
+                }
+                GitRepoStatus::NotGitRepo => {
+                    // Regular directory, no git history to scan
                 }
             }
         }
@@ -126,8 +140,8 @@ pub async fn run(args: ScanArgs) -> Result<()> {
             status: status.to_string(),
             files_scanned,
             findings: findings.clone(),
-            skipped_files,
-            git_warning,
+            skipped_files: skipped_files.clone(),
+            git_warning: git_warning.clone(),
         };
 
         let json_str = serde_json::to_string_pretty(&report)?;
@@ -139,6 +153,13 @@ pub async fn run(args: ScanArgs) -> Result<()> {
                 findings.len()
             );
         }
+
+        if has_incomplete_coverage && !args.allow_partial {
+            bail!(
+                "Scan incomplete: coverage was limited by skipped files or git errors. Pass `--allow-partial` to permit partial scans."
+            );
+        }
+
         return Ok(());
     }
 
@@ -176,6 +197,12 @@ pub async fn run(args: ScanArgs) -> Result<()> {
                 "{} No secrets detected in scanned files, but coverage was incomplete due to skipped files or git errors.",
                 "⚠".if_supports_color(Stream::Stdout, |t| t.style(warn_style))
             );
+            if !args.allow_partial {
+                bail!(
+                    "Scan incomplete: {} file(s) skipped or git error encountered. Pass `--allow-partial` to permit partial scans.",
+                    skipped_files.len()
+                );
+            }
         } else {
             println!(
                 "{} Scan complete. No secrets detected ({} file(s) scanned).",
@@ -301,4 +328,115 @@ fn offer_gitignore_remediation(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_scan_clean_dir_succeeds() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("asur_test_scan_clean_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("clean.txt"), "hello world").unwrap();
+
+        let args = ScanArgs {
+            path: temp_dir.clone(),
+            install_hook: false,
+            no_history: true,
+            staged: false,
+            json: false,
+            allow_partial: false,
+            yes: true,
+        };
+
+        let result = run(args).await;
+        assert!(result.is_ok());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_scan_partial_coverage_requires_allow_partial() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("asur_test_scan_partial_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create a file > 1MB so it gets skipped
+        let large_data = vec![b'A'; 1_048_576 + 10];
+        std::fs::write(temp_dir.join("large.txt"), large_data).unwrap();
+
+        // Without allow_partial, it must bail
+        let args_strict = ScanArgs {
+            path: temp_dir.clone(),
+            install_hook: false,
+            no_history: true,
+            staged: false,
+            json: false,
+            allow_partial: false,
+            yes: true,
+        };
+        let res_strict = run(args_strict).await;
+        assert!(res_strict.is_err());
+        assert!(
+            res_strict
+                .unwrap_err()
+                .to_string()
+                .contains("Scan incomplete")
+        );
+
+        // With allow_partial, it succeeds
+        let args_lenient = ScanArgs {
+            path: temp_dir.clone(),
+            install_hook: false,
+            no_history: true,
+            staged: false,
+            json: false,
+            allow_partial: true,
+            yes: true,
+        };
+        let res_lenient = run(args_lenient).await;
+        assert!(res_lenient.is_ok());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_scan_json_partial_coverage_requires_allow_partial() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "asur_test_scan_json_partial_{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let large_data = vec![b'B'; 1_048_576 + 10];
+        std::fs::write(temp_dir.join("large2.txt"), large_data).unwrap();
+
+        let args_strict_json = ScanArgs {
+            path: temp_dir.clone(),
+            install_hook: false,
+            no_history: true,
+            staged: false,
+            json: true,
+            allow_partial: false,
+            yes: true,
+        };
+        let res_strict = run(args_strict_json).await;
+        assert!(res_strict.is_err());
+
+        let args_lenient_json = ScanArgs {
+            path: temp_dir.clone(),
+            install_hook: false,
+            no_history: true,
+            staged: false,
+            json: true,
+            allow_partial: true,
+            yes: true,
+        };
+        let res_lenient = run(args_lenient_json).await;
+        assert!(res_lenient.is_ok());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
