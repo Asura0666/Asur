@@ -16,7 +16,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Built on an older Ubuntu on purpose: a glibc binary only runs on systems
+          # with the same or newer glibc, so building on ubuntu-latest would exclude
+          # Ubuntu 22.04, Debian 12 and similar.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             binary_name: asur
             asset_name: asur-linux-x86_64.tar.gz

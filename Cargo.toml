@@ -1,6 +1,6 @@
 [package]
 name = "asur"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 rust-version = "1.85"
 description = "One CLI for everyday local dev: containers, ports, .env files and leaked secrets."
@@ -10,6 +10,8 @@ repository = "https://github.com/Asura0666/Asur"
 homepage = "https://github.com/Asura0666/Asur"
 keywords = ["cli", "docker", "developer-tools", "env", "secrets"]
 categories = ["command-line-utilities", "development-tools"]
+# Keep the published crate small: repo-only files are not needed on crates.io.
+exclude = [".github/", ".asurignore", "PROJECT_BRIEF.md", "CONTRIBUTING.md"]
 
 [dependencies]
 anyhow = "1.0.104"

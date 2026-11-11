@@ -1,4 +1,4 @@
-# Asur v1.0.2
+# Asur v1.0.3
 
 > One fast, single-binary CLI for everyday local dev — spin up containers, resolve port conflicts, sync `.env` files, and catch leaked secrets.
 
@@ -6,7 +6,13 @@
 
 ## Install
 
-### Pre-built binary (recommended)
+### Via Cargo (crates.io)
+
+```bash
+cargo install asur
+```
+
+### Pre-built binary
 
 Go to [**Releases**](https://github.com/Asura0666/Asur/releases/latest) and download the binary for your platform:
 

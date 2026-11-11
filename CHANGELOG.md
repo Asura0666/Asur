@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.0.3] – 2026-11-12
+
+### Packaging & Distribution (crates.io readiness)
+
+- **Crate Package Optimization**:
+  - Added `exclude` rules in `Cargo.toml` (`.github/`, `.asurignore`, `PROJECT_BRIEF.md`, `CONTRIBUTING.md`) to package only necessary source, licenses, and documentation for crates.io.
+- **Linux glibc Compatibility**:
+  - Moved GitHub Actions release build runner to `ubuntu-22.04` (glibc 2.35) so Linux release binaries run across Ubuntu 22.04+, Debian 12+, and other mainstream distributions without requiring newer glibc.
+
+---
+
 ## [1.0.2] – 2026-11-12
 
 ### Fixed & Security Hardening (Post-Audit Hardening)
