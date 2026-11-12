@@ -1,19 +1,63 @@
 name: Release
 
+# Pushing a version tag runs verification, builds the platform archives, creates a
+# GitHub release, and publishes the crate to crates.io last.
+# This job uses crates.io Trusted Publishing; no API token is stored in GitHub.
+# Keep this filename and the "release" environment aligned with the crates.io
+# Trusted Publisher configuration.
 on:
   push:
     tags:
       - 'v*.*.*'
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  build-release:
+  verify:
+    name: Verify tag, tests and package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag must be on main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::$GITHUB_REF_NAME is not on main. Merge to main first, then tag."
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tag must match the version in Cargo.toml
+        run: |
+          crate_version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "asur") | .version')
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$crate_version" != "$tag_version" ]; then
+            echo "::error::Tag is $GITHUB_REF_NAME but Cargo.toml says $crate_version. Fix the version, delete the tag, and tag again."
+            exit 1
+          fi
+
+      - name: Tests
+        run: cargo test --all-targets --locked
+
+      - name: Check the crate package and build (uploads nothing)
+        run: cargo publish --dry-run --locked
+
+  build:
     name: Build (${{ matrix.target }})
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           # Built on an older Ubuntu on purpose: a glibc binary only runs on systems
@@ -45,7 +89,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package archive (Unix)
         if: runner.os != 'Windows'
@@ -72,9 +116,52 @@ jobs:
           $hash = (Get-FileHash -Path ${{ matrix.asset_name }} -Algorithm SHA256).Hash.ToLower()
           "$hash  ${{ matrix.asset_name }}" | Out-File -Encoding ascii "${{ matrix.asset_name }}.sha256"
 
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Keep the files for the release job
+        uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: dist-${{ matrix.target }}
+          path: |
             ${{ matrix.asset_name }}
             ${{ matrix.asset_name }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Create the release with all files at once
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Get a short-lived crates.io token
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
