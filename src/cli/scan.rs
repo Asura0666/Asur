@@ -11,7 +11,8 @@ use tabled::{Table, Tabled, settings::Style as TableStyle};
 
 use crate::scan::{
     Allowlist, Finding, GitRepoStatus, SecretScanner, SkippedFile, check_git_repo_status,
-    install_pre_commit_hook, scan_git_history, scan_staged_changes, scan_working_tree,
+    install_pre_commit_hook, scan_git_history, scan_staged_changes,
+    scan_working_tree_with_progress,
 };
 use crate::ui;
 
@@ -61,6 +62,9 @@ struct ScanJsonReport {
 }
 
 pub async fn run(args: ScanArgs) -> Result<()> {
+    if !args.json {
+        ui::header("scan", args.path.to_str());
+    }
     let scan_dir = if args.path.is_relative() {
         std::env::current_dir()?.join(&args.path)
     } else {
@@ -97,7 +101,58 @@ pub async fn run(args: ScanArgs) -> Result<()> {
     if args.staged {
         findings = scan_staged_changes(&scan_dir, &scanner, &allowlist)?;
     } else {
-        let wt_report = scan_working_tree(&scan_dir, &scanner, &allowlist)?;
+        let scan_spinner = if args.json {
+            None
+        } else {
+            Some(ui::Spinner::new(
+                "Scanning working tree (streaming traversal)...",
+            ))
+        };
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let scan_root = scan_dir.clone();
+        let scan_scanner = scanner.clone();
+        let scan_allowlist = allowlist.clone();
+        let scan_task = tokio::task::spawn_blocking(move || {
+            scan_working_tree_with_progress(
+                &scan_root,
+                &scan_scanner,
+                &scan_allowlist,
+                |progress| {
+                    if progress.files_discovered % 100 == 0 {
+                        let _ = progress_tx.send(progress);
+                    }
+                    true
+                },
+            )
+        });
+        while let Some(progress) = progress_rx.recv().await {
+            if let Some(spinner) = &scan_spinner {
+                spinner.set_message(format!(
+                    "Scanning: {} directories, {} discovered, {} scanned, {} skipped{}",
+                    progress.directories_visited,
+                    progress.files_discovered,
+                    progress.files_scanned,
+                    progress.files_skipped,
+                    progress
+                        .current_path
+                        .as_deref()
+                        .map(|path| format!(" ({path})"))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        let wt_report = scan_task
+            .await
+            .map_err(|error| anyhow::anyhow!("scan worker failed: {error}"))??;
+        if let Some(spinner) = &scan_spinner {
+            spinner.finish(format!(
+                "Working tree complete: {} directories, {} discovered, {} scanned, {} skipped.",
+                wt_report.directories_visited,
+                wt_report.files_discovered,
+                wt_report.files_scanned,
+                wt_report.skipped_files.len()
+            ));
+        }
         files_scanned = wt_report.files_scanned;
         findings.extend(wt_report.findings);
         skipped_files.extend(wt_report.skipped_files);
@@ -106,6 +161,7 @@ pub async fn run(args: ScanArgs) -> Result<()> {
         if !args.no_history {
             match check_git_repo_status(&scan_dir) {
                 GitRepoStatus::InsideWorkTree => {
+                    let history_spinner = ui::Spinner::new("Scanning Git history...");
                     match scan_git_history(&scan_dir, &scanner, &allowlist, Some(200)) {
                         Ok(history_findings) => findings.extend(history_findings),
                         Err(err) => {
@@ -113,6 +169,7 @@ pub async fn run(args: ScanArgs) -> Result<()> {
                                 Some(format!("Git history scan could not be completed: {err}"));
                         }
                     }
+                    history_spinner.finish("Git history scan complete.");
                 }
                 GitRepoStatus::GitUnavailable(reason) => {
                     git_warning = Some(format!("Git history could not be verified: {reason}"));

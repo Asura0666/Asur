@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -21,63 +21,70 @@ pub struct WorkingTreeReport {
     pub findings: Vec<Finding>,
     pub files_scanned: usize,
     pub skipped_files: Vec<SkippedFile>,
+    pub directories_visited: usize,
+    pub files_discovered: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScanProgress {
+    pub directories_visited: usize,
+    pub files_discovered: usize,
+    pub files_scanned: usize,
+    pub files_skipped: usize,
+    pub current_path: Option<String>,
 }
 
 /// Scan working tree files starting from `root`.
+#[cfg(test)]
 pub fn scan_working_tree(
     root: &Path,
     scanner: &SecretScanner,
     allowlist: &Allowlist,
 ) -> Result<WorkingTreeReport> {
-    let mut report = WorkingTreeReport::default();
-    let mut files_to_scan = Vec::new();
+    scan_working_tree_with_progress(root, scanner, allowlist, |_| true)
+}
 
-    collect_files(
+/// Stream traversal and scanning in one pass. `on_progress` can request a
+/// cooperative cancellation by returning false. Symlinks are never followed:
+/// this prevents a scan from escaping its explicit root.
+pub fn scan_working_tree_with_progress<F>(
+    root: &Path,
+    scanner: &SecretScanner,
+    allowlist: &Allowlist,
+    mut on_progress: F,
+) -> Result<WorkingTreeReport>
+where
+    F: FnMut(ScanProgress) -> bool,
+{
+    let mut report = WorkingTreeReport::default();
+    scan_directory(
         root,
         root,
         allowlist,
-        &mut files_to_scan,
-        &mut report.skipped_files,
+        scanner,
+        &mut report,
+        &mut on_progress,
     )?;
-
-    for file_path in files_to_scan {
-        match scan_single_file(&file_path, root, scanner) {
-            Ok(Some(file_findings)) => {
-                report.files_scanned += 1;
-                report.findings.extend(file_findings);
-            }
-            Ok(None) => {
-                // Binary content, legitimately skipped
-            }
-            Err(err) => {
-                let display_path = file_path
-                    .strip_prefix(root)
-                    .unwrap_or(&file_path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                report.skipped_files.push(SkippedFile {
-                    path: display_path,
-                    reason: format!("read error: {err}"),
-                });
-            }
-        }
-    }
-
     Ok(report)
 }
 
-fn collect_files(
+fn scan_directory<F>(
     root: &Path,
     current_dir: &Path,
     allowlist: &Allowlist,
-    collected: &mut Vec<PathBuf>,
-    skipped: &mut Vec<SkippedFile>,
-) -> Result<()> {
+    scanner: &SecretScanner,
+    report: &mut WorkingTreeReport,
+    on_progress: &mut F,
+) -> Result<()>
+where
+    F: FnMut(ScanProgress) -> bool,
+{
+    report.directories_visited += 1;
     let entries = match std::fs::read_dir(current_dir) {
         Ok(e) => e,
         Err(err) => {
             let rel = current_dir.strip_prefix(root).unwrap_or(current_dir);
-            skipped.push(SkippedFile {
+            report.skipped_files.push(SkippedFile {
                 path: rel.to_string_lossy().replace('\\', "/"),
                 reason: format!("directory unreadable: {err}"),
             });
@@ -87,6 +94,27 @@ fn collect_files(
 
     for entry in entries.flatten() {
         let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(err) => {
+                report.skipped_files.push(SkippedFile {
+                    path: path.to_string_lossy().replace('\\', "/"),
+                    reason: format!("failed to read file type: {err}"),
+                });
+                continue;
+            }
+        };
+        if file_type.is_symlink() {
+            report.skipped_files.push(SkippedFile {
+                path: path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                reason: "symlink not followed (scan root boundary)".into(),
+            });
+            continue;
+        }
         let file_name = path
             .file_name()
             .map(|s| s.to_string_lossy())
@@ -102,9 +130,10 @@ fn collect_files(
             continue;
         }
 
-        if path.is_dir() {
-            collect_files(root, &path, allowlist, collected, skipped)?;
-        } else if path.is_file() {
+        if file_type.is_dir() {
+            scan_directory(root, &path, allowlist, scanner, report, on_progress)?;
+        } else if file_type.is_file() {
+            report.files_discovered += 1;
             if is_binary_extension(&path) {
                 continue;
             }
@@ -112,7 +141,7 @@ fn collect_files(
                 Ok(metadata) => {
                     let len = metadata.len();
                     if len > MAX_FILE_SIZE_BYTES {
-                        skipped.push(SkippedFile {
+                        report.skipped_files.push(SkippedFile {
                             path: rel_path.to_string_lossy().replace('\\', "/"),
                             reason: format!(
                                 "exceeds {} MB limit ({:.2} MB)",
@@ -124,14 +153,34 @@ fn collect_files(
                     }
                 }
                 Err(err) => {
-                    skipped.push(SkippedFile {
+                    report.skipped_files.push(SkippedFile {
                         path: rel_path.to_string_lossy().replace('\\', "/"),
                         reason: format!("failed to read metadata: {err}"),
                     });
                     continue;
                 }
             }
-            collected.push(path);
+            let progress = ScanProgress {
+                directories_visited: report.directories_visited,
+                files_discovered: report.files_discovered,
+                files_scanned: report.files_scanned,
+                files_skipped: report.skipped_files.len(),
+                current_path: Some(rel_path.to_string_lossy().replace('\\', "/")),
+            };
+            if !(*on_progress)(progress) {
+                anyhow::bail!("scan cancelled");
+            }
+            match scan_single_file(&path, root, scanner) {
+                Ok(Some(file_findings)) => {
+                    report.files_scanned += 1;
+                    report.findings.extend(file_findings);
+                }
+                Ok(None) => {}
+                Err(err) => report.skipped_files.push(SkippedFile {
+                    path: rel_path.to_string_lossy().replace('\\', "/"),
+                    reason: format!("read error: {err}"),
+                }),
+            }
         }
     }
 
@@ -297,6 +346,44 @@ mod tests {
                 .contains("exceeds 1 MB limit")
         );
 
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn streaming_walker_reports_progress_without_buffering_paths() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("asur_test_scan_progress_{}", rand::random::<u64>()));
+        fs::create_dir_all(temp_dir.join("nested")).unwrap();
+        fs::write(temp_dir.join("nested/one.txt"), "safe").unwrap();
+        fs::write(temp_dir.join("two.txt"), "safe").unwrap();
+
+        let scanner = SecretScanner::new();
+        let allowlist = Allowlist::new();
+        let mut progress_updates = 0;
+        let report = scan_working_tree_with_progress(&temp_dir, &scanner, &allowlist, |_| {
+            progress_updates += 1;
+            true
+        })
+        .unwrap();
+
+        assert_eq!(report.files_discovered, 2);
+        assert_eq!(report.files_scanned, 2);
+        assert!(report.directories_visited >= 2);
+        assert_eq!(progress_updates, 2);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn streaming_walker_honors_cooperative_cancellation() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("asur_test_scan_cancel_{}", rand::random::<u64>()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("one.txt"), "safe").unwrap();
+        let scanner = SecretScanner::new();
+        let error =
+            scan_working_tree_with_progress(&temp_dir, &scanner, &Allowlist::new(), |_| false)
+                .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

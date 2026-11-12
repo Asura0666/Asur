@@ -15,10 +15,13 @@ use bollard::{
 use futures_util::StreamExt;
 use std::collections::HashMap;
 
-use super::{ContainerInfo, ContainerRuntime, CreateContainerConfig};
+use super::{
+    ContainerInfo, ContainerRuntime, CreateContainerConfig, OperationEvent, OperationStatus,
+};
 
 /// Docker backend.  Connects to the local Docker daemon via the platform
 /// default socket / named pipe.
+#[derive(Clone)]
 pub struct DockerRuntime {
     docker: Docker,
 }
@@ -58,16 +61,68 @@ impl ContainerRuntime for DockerRuntime {
     }
 
     async fn run_container(&self, config: CreateContainerConfig) -> Result<ContainerInfo> {
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.run_container_with_progress(config, events).await
+    }
+
+    async fn run_container_with_progress(
+        &self,
+        config: CreateContainerConfig,
+        events: tokio::sync::mpsc::UnboundedSender<OperationEvent>,
+    ) -> Result<ContainerInfo> {
+        let readiness_config = config.clone();
+        let emit = |status, detail: String| {
+            let _ = events.send(OperationEvent::stage(status, detail));
+        };
+        emit(
+            OperationStatus::CheckingImage,
+            format!("checking image {}", config.image),
+        );
         // 1. Ensure image is available locally; pull if not
         if self.docker.inspect_image(&config.image).await.is_err() {
+            emit(
+                OperationStatus::Pulling,
+                format!("pulling image {}", config.image),
+            );
             let options = Some(CreateImageOptions {
                 from_image: config.image.clone(),
                 ..Default::default()
             });
             let mut stream = self.docker.create_image(options, None, None);
             while let Some(result) = stream.next().await {
-                if let Err(e) = result {
-                    return Err(format_docker_error(e));
+                match result {
+                    Ok(update) => {
+                        if let Some(error) = update.error {
+                            let message = format!("image pull failed: {error}");
+                            emit(OperationStatus::Failed, message.clone());
+                            anyhow::bail!(message);
+                        }
+                        let layer_id = update.id.clone();
+                        let detail = match (update.id, update.status, update.progress) {
+                            (Some(layer), Some(status), Some(progress)) => {
+                                format!("{layer}: {status} ({progress})")
+                            }
+                            (Some(layer), Some(status), None) => format!("{layer}: {status}"),
+                            (_, Some(status), _) => status,
+                            _ => "waiting for Docker pull progress".to_string(),
+                        };
+                        let (current_bytes, total_bytes) = update
+                            .progress_detail
+                            .map(|d| (d.current, d.total))
+                            .unwrap_or((None, None));
+                        let _ = events.send(OperationEvent {
+                            status: OperationStatus::Pulling,
+                            detail,
+                            layer_id,
+                            current_bytes,
+                            total_bytes,
+                        });
+                    }
+                    Err(e) => {
+                        let error = format_docker_error(e);
+                        emit(OperationStatus::Failed, error.to_string());
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -130,6 +185,10 @@ impl ContainerRuntime for DockerRuntime {
             platform: None,
         };
 
+        emit(
+            OperationStatus::Creating,
+            format!("creating container {}", config.name),
+        );
         self.docker
             .create_container(Some(create_options), container_config)
             .await
@@ -148,6 +207,10 @@ impl ContainerRuntime for DockerRuntime {
             })?;
 
         // 6. Start container
+        emit(
+            OperationStatus::Starting,
+            format!("starting container {}", config.name),
+        );
         if let Err(e) = self
             .docker
             .start_container::<String>(&config.name, None)
@@ -162,17 +225,24 @@ impl ContainerRuntime for DockerRuntime {
                 || lower.contains("address already in use")
                 || lower.contains("bind for")
             {
-                return Err(anyhow::anyhow!(
+                let error = anyhow::anyhow!(
                     "failed to start `{}`: port conflict.\n\n\
                      One or more requested ports are already in use by another container or process.\n\
                      Run `asur ps` to check existing containers, or specify a different port.",
                     config.name
-                ));
+                );
+                emit(OperationStatus::Failed, error.to_string());
+                return Err(error);
             }
-            return Err(format_docker_error(e));
+            let error = format_docker_error(e);
+            emit(OperationStatus::Failed, error.to_string());
+            return Err(error);
         }
 
-        Ok(ContainerInfo {
+        self.wait_for_readiness(&readiness_config, events.clone())
+            .await?;
+
+        let info = ContainerInfo {
             name: config.name,
             image: config.image,
             status: "Up just now".to_string(),
@@ -182,7 +252,54 @@ impl ContainerRuntime for DockerRuntime {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64,
-        })
+        };
+        emit(
+            OperationStatus::Running,
+            format!("{} is running", info.name),
+        );
+        Ok(info)
+    }
+
+    async fn wait_for_readiness(
+        &self,
+        config: &CreateContainerConfig,
+        events: tokio::sync::mpsc::UnboundedSender<OperationEvent>,
+    ) -> Result<()> {
+        use tokio::net::TcpStream;
+        use tokio::time::{Duration, Instant, sleep, timeout};
+
+        // A listening mapped TCP port proves the service has bound its public
+        // interface; unlike Docker's running state it is not assumed ready.
+        // Services with no published port have no safe generic probe.
+        let Some((host_port, _)) = config.ports.first().copied() else {
+            let _ = events.send(OperationEvent::stage(
+                OperationStatus::WaitingForReadiness,
+                "no published port; Docker started the container but readiness cannot be probed",
+            ));
+            return Ok(());
+        };
+        let _ = events.send(OperationEvent::stage(
+            OperationStatus::WaitingForReadiness,
+            format!("waiting for service to listen on 127.0.0.1:{host_port}"),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match timeout(
+                Duration::from_secs(1),
+                TcpStream::connect(("127.0.0.1", host_port)),
+            )
+            .await
+            {
+                Ok(Ok(_)) => return Ok(()),
+                _ if Instant::now() >= deadline => {
+                    anyhow::bail!(
+                        "container `{}` started but the service did not accept TCP connections on port {host_port} within 30 seconds",
+                        config.name
+                    );
+                }
+                _ => sleep(Duration::from_millis(250)).await,
+            }
+        }
     }
 
     async fn stop_container(&self, id_or_name: &str) -> Result<()> {
@@ -315,13 +432,11 @@ impl ContainerRuntime for DockerRuntime {
                 v: false,
                 ..Default::default()
             };
-            if self
-                .docker
-                .remove_container(id, Some(options))
-                .await
-                .is_ok()
-            {
-                results.containers_removed += 1;
+            match self.docker.remove_container(id, Some(options)).await {
+                Ok(_) => results.containers_removed += 1,
+                Err(error) => results
+                    .failures
+                    .push(format!("container {id}: {}", format_docker_error(error))),
             }
         }
 
@@ -330,19 +445,20 @@ impl ContainerRuntime for DockerRuntime {
                 force: true,
                 ..Default::default()
             };
-            if self
-                .docker
-                .remove_image(id, Some(options), None)
-                .await
-                .is_ok()
-            {
-                results.images_removed += 1;
+            match self.docker.remove_image(id, Some(options), None).await {
+                Ok(_) => results.images_removed += 1,
+                Err(error) => results
+                    .failures
+                    .push(format!("image {id}: {}", format_docker_error(error))),
             }
         }
 
         for name in volume_names {
-            if self.docker.remove_volume(name, None).await.is_ok() {
-                results.volumes_removed += 1;
+            match self.docker.remove_volume(name, None).await {
+                Ok(_) => results.volumes_removed += 1,
+                Err(error) => results
+                    .failures
+                    .push(format!("volume {name}: {}", format_docker_error(error))),
             }
         }
 

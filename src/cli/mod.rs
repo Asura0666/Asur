@@ -29,6 +29,15 @@ use clap::{Parser, Subcommand};
     arg_required_else_help = true
 )]
 pub struct Cli {
+    /// Use simple line-oriented output without terminal decorations.
+    #[arg(long, global = true)]
+    pub plain: bool,
+    /// Disable ANSI colors while preserving layout.
+    #[arg(long, global = true)]
+    pub no_color: bool,
+    /// Disable animated spinners and progress bars.
+    #[arg(long, global = true)]
+    pub no_progress: bool,
     #[command(subcommand)]
     pub command: Commands,
 }

@@ -8,13 +8,20 @@ pub use config::{CustomOptions, LaunchSummary, build_container_config};
 
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
+use std::sync::Arc;
+use std::time::SystemTime;
+
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use anyhow::{Result, bail};
 use clap::Args;
 use owo_colors::{OwoColorize, Stream, Style};
 
 use crate::catalog::{Catalog, Service};
-use crate::docker::{ContainerRuntime, DockerRuntime};
+use crate::docker::{
+    ContainerRuntime, DockerRuntime, OperationEvent, OperationRecord, OperationStatus,
+};
 use crate::ui;
 use crate::util::clipboard::copy_to_clipboard;
 use crate::util::ports::{
@@ -38,18 +45,24 @@ pub struct UpArgs {
 
 pub async fn run(args: UpArgs) -> Result<()> {
     let catalog = Catalog::load()?;
-    let runtime = DockerRuntime::connect()?;
+    let runtime = Arc::new(DockerRuntime::connect()?);
     let is_interactive = std::io::stdin().is_terminal();
-
-    let mut all_summaries = Vec::new();
+    let mut operations = OperationManager::default();
     let mut initial_services = args.services.clone();
 
     loop {
         // Query existing containers from Docker to discover already allocated ports & names
+        operations.drain_updates();
         let existing_containers = runtime.list_containers(true).await.unwrap_or_default();
-        let docker_ports = extract_docker_ports(&existing_containers);
-        let existing_names: HashSet<String> =
+        let mut docker_ports = extract_docker_ports(&existing_containers);
+        for port in &operations.reserved_ports {
+            docker_ports
+                .entry(*port)
+                .or_insert_with(|| "an active Asur operation".to_string());
+        }
+        let mut existing_names: HashSet<String> =
             existing_containers.iter().map(|c| c.name.clone()).collect();
+        existing_names.extend(operations.reserved_names.iter().cloned());
 
         // Resolve the service to configure in this pass
         let service = if !initial_services.is_empty() {
@@ -72,35 +85,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
 
         let (container_config, summary) = build_container_config(service, &options);
 
+        let operation_id = operations.start(runtime.clone(), container_config, summary);
         ui::info(&format!(
-            "Starting `{}` ({}) as `{}` on port {}...",
-            service.name, summary.image, summary.container_name, summary.port
+            "Queued operation #{operation_id}. Continue configuring services while it runs."
         ));
-
-        match runtime.run_container(container_config).await {
-            Ok(_) => {
-                // Copy connection string to clipboard
-                let copied = copy_to_clipboard(&summary.connection_string);
-                print_summary(&summary, copied);
-                all_summaries.push(summary);
-            }
-            Err(e) => {
-                ui::error(&format!("{e:#}"));
-                if is_interactive {
-                    let retry = inquire::Confirm::new(
-                        "Would you like to try again with different settings (e.g. different port or name)?",
-                    )
-                    .with_default(true)
-                    .prompt()
-                    .unwrap_or(false);
-
-                    if retry {
-                        initial_services.insert(0, service.name.clone());
-                        continue;
-                    }
-                }
-            }
-        }
 
         // If command-line specified multiple services, continue through them
         if !initial_services.is_empty() {
@@ -109,10 +97,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
 
         // Interactive follow-up options: done, compose, or spin another
         if is_interactive {
-            let mut actions = vec!["Done (exit)", "Spin up another service"];
-            if !all_summaries.is_empty() {
-                actions.push("Generate docker-compose.yml");
-            }
+            let actions = vec![
+                "Done (wait for operations and exit)",
+                "Spin up another service",
+                "Show operation status",
+                "Generate docker-compose.yml (wait for operations)",
+            ];
 
             let action = inquire::Select::new("What would you like to do next?", actions)
                 .prompt()
@@ -120,8 +110,13 @@ pub async fn run(args: UpArgs) -> Result<()> {
 
             match action {
                 "Spin up another service" => continue,
-                "Generate docker-compose.yml" => {
-                    write_compose_file(&all_summaries)?;
+                "Show operation status" => {
+                    operations.render_status();
+                    continue;
+                }
+                "Generate docker-compose.yml (wait for operations)" => {
+                    operations.wait_all().await;
+                    write_compose_file(&operations.completed_summaries)?;
                     break;
                 }
                 _ => break,
@@ -131,11 +126,275 @@ pub async fn run(args: UpArgs) -> Result<()> {
         }
     }
 
-    if args.compose && !all_summaries.is_empty() {
-        write_compose_file(&all_summaries)?;
+    operations.wait_all().await;
+    if args.compose && !operations.completed_summaries.is_empty() {
+        write_compose_file(&operations.completed_summaries)?;
     }
 
     Ok(())
+}
+
+/// Owns every background launch for the lifetime of `asur up`.  It is
+/// intentionally process-local: closing the CLI waits for operations rather
+/// than falsely implying that a detached task will survive process exit.
+struct OperationManager {
+    next_id: u64,
+    records: HashMap<u64, OperationRecord>,
+    reserved_names: HashSet<String>,
+    reserved_ports: HashSet<u16>,
+    permits: Arc<Semaphore>,
+    joins: JoinSet<(u64, LaunchSummary, Result<crate::docker::ContainerInfo>)>,
+    events_tx: Option<tokio::sync::mpsc::UnboundedSender<(u64, OperationEvent)>>,
+    events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(u64, OperationEvent)>>,
+    byte_progress: HashMap<u64, ui::Progress>,
+    pull_layers: HashMap<u64, HashMap<String, (u64, u64)>>,
+    displayed_percent: HashMap<u64, u64>,
+    completed_summaries: Vec<LaunchSummary>,
+}
+
+impl Default for OperationManager {
+    fn default() -> Self {
+        Self {
+            next_id: 0,
+            records: HashMap::new(),
+            reserved_names: HashSet::new(),
+            reserved_ports: HashSet::new(),
+            // Docker pulls and image decompression are resource-heavy. Four
+            // active operations keep the UI responsive without unbounded work.
+            permits: Arc::new(Semaphore::new(4)),
+            joins: JoinSet::new(),
+            events_tx: None,
+            events_rx: None,
+            byte_progress: HashMap::new(),
+            pull_layers: HashMap::new(),
+            displayed_percent: HashMap::new(),
+            completed_summaries: Vec::new(),
+        }
+    }
+}
+
+impl OperationManager {
+    fn start(
+        &mut self,
+        runtime: Arc<DockerRuntime>,
+        config: crate::docker::CreateContainerConfig,
+        summary: LaunchSummary,
+    ) -> u64 {
+        if self.events_tx.is_none() {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            self.events_tx = Some(tx);
+            self.events_rx = Some(rx);
+        }
+        self.next_id += 1;
+        let id = self.next_id;
+        self.reserved_names.insert(config.name.clone());
+        self.reserved_ports
+            .extend(config.ports.iter().map(|(host, _)| *host));
+        self.records.insert(
+            id,
+            OperationRecord {
+                id,
+                service: summary.service_name.clone(),
+                resource: config.name.clone(),
+                image: config.image.clone(),
+                created_at: SystemTime::now(),
+                status: OperationStatus::Queued,
+                detail: format!("{} ({})", config.name, config.image),
+                error: None,
+            },
+        );
+        let tx = self
+            .events_tx
+            .as_ref()
+            .expect("operation event channel initialized")
+            .clone();
+        let permits = self.permits.clone();
+        self.joins.spawn(async move {
+            let (operation_tx, mut operation_rx) = tokio::sync::mpsc::unbounded_channel();
+            let forwarder = tokio::spawn(async move {
+                while let Some(event) = operation_rx.recv().await {
+                    let _ = tx.send((id, event));
+                }
+            });
+            let result = match permits.acquire_owned().await {
+                Ok(_permit) => {
+                    runtime
+                        .run_container_with_progress(config, operation_tx)
+                        .await
+                }
+                Err(_) => Err(anyhow::anyhow!(
+                    "operation manager shut down before operation could start"
+                )),
+            };
+            let _ = forwarder.await;
+            (id, summary, result)
+        });
+        id
+    }
+
+    fn drain_updates(&mut self) {
+        let mut events = Vec::new();
+        if let Some(rx) = &mut self.events_rx {
+            while let Ok((id, event)) = rx.try_recv() {
+                events.push((id, event));
+            }
+        }
+        for (id, event) in events {
+            self.apply_event(id, event);
+        }
+        while let Some(result) = self.joins.try_join_next() {
+            self.handle_join(result);
+        }
+    }
+
+    async fn wait_all(&mut self) {
+        // Do not await a join in isolation: Docker emits pull events while the
+        // task is alive, and those events must be rendered as they arrive.
+        while !self.joins.is_empty() {
+            tokio::select! {
+                Some((id, event)) = async {
+                    match &mut self.events_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => self.apply_event(id, event),
+                Some(result) = self.joins.join_next() => self.handle_join(result),
+            }
+        }
+        self.drain_updates();
+    }
+
+    fn apply_event(&mut self, id: u64, event: OperationEvent) {
+        // Docker's byte totals are per layer and a layer can finish well
+        // before image extraction or the readiness probe. Do not leave a
+        // misleading full operation bar on screen after the pull phase.
+        if event.status != OperationStatus::Pulling {
+            if let Some(progress) = self.byte_progress.remove(&id) {
+                progress.finish("");
+            }
+            self.pull_layers.remove(&id);
+            self.displayed_percent.remove(&id);
+        }
+        if let (Some(current), Some(total)) = (event.current_bytes, event.total_bytes)
+            && total > 0
+            && current >= 0
+        {
+            // Docker reports bytes *per layer*, not for the whole image. Keep
+            // the latest value for each layer and render their aggregate so a
+            // layer switch never resets the operation bar back to zero.
+            let layers = self.pull_layers.entry(id).or_default();
+            layers.insert(
+                event
+                    .layer_id
+                    .clone()
+                    .unwrap_or_else(|| "operation".to_string()),
+                (current as u64, total as u64),
+            );
+            let (aggregate_current, aggregate_total) = layers.values().fold(
+                (0_u64, 0_u64),
+                |(current_sum, total_sum), (layer_current, layer_total)| {
+                    (
+                        current_sum.saturating_add(*layer_current),
+                        total_sum.saturating_add(*layer_total),
+                    )
+                },
+            );
+            let progress = self.byte_progress.entry(id).or_insert_with(|| {
+                ui::Progress::new(
+                    format!("operation #{id}: downloading image"),
+                    aggregate_total,
+                )
+            });
+            let percent = aggregate_current.saturating_mul(100) / aggregate_total.max(1);
+            // Layer totals arrive incrementally. A newly discovered layer can
+            // make Docker's provisional aggregate smaller even while no bytes
+            // were lost, so preserve the highest rendered percentage.
+            let displayed = self.displayed_percent.entry(id).or_insert(0);
+            // 100% is reserved for the terminal completion state. Docker can
+            // report a single layer at 100% while more layers or readiness
+            // work remain, so showing it earlier would be false.
+            *displayed = (*displayed).max(percent.min(99));
+            progress.set_percent(*displayed);
+        }
+        if let Some(record) = self.records.get_mut(&id) {
+            record.status = event.status;
+            record.detail = format_progress(&event);
+            if event.status == OperationStatus::Failed {
+                record.error = Some(event.detail);
+            }
+        }
+    }
+
+    fn handle_join(
+        &mut self,
+        result: Result<
+            (u64, LaunchSummary, Result<crate::docker::ContainerInfo>),
+            tokio::task::JoinError,
+        >,
+    ) {
+        match result {
+            Ok((id, summary, Ok(_))) => {
+                if let Some(progress) = self.byte_progress.remove(&id) {
+                    progress.finish(format!("operation #{id}: image ready"));
+                }
+                self.pull_layers.remove(&id);
+                self.displayed_percent.remove(&id);
+                if let Some(record) = self.records.get_mut(&id) {
+                    record.status = OperationStatus::Running;
+                    record.detail = "container is running".into();
+                }
+                let copied = copy_to_clipboard(&summary.connection_string);
+                print_summary(&summary, copied);
+                self.completed_summaries.push(summary);
+            }
+            Ok((id, _, Err(error))) => {
+                if let Some(progress) = self.byte_progress.remove(&id) {
+                    progress.finish(format!("operation #{id}: image pull failed"));
+                }
+                self.pull_layers.remove(&id);
+                self.displayed_percent.remove(&id);
+                if let Some(record) = self.records.get_mut(&id) {
+                    record.status = OperationStatus::Failed;
+                    record.detail = "operation failed".into();
+                    record.error = Some(format!("{error:#}"));
+                }
+                ui::error(&format!("operation #{id} failed: {error:#}"));
+            }
+            Err(error) => ui::error(&format!("container operation task failed: {error}")),
+        }
+    }
+
+    fn render_status(&mut self) {
+        self.drain_updates();
+        println!("\nOperations:");
+        for record in self.records.values() {
+            let status = format!("{:?}", record.status).to_lowercase();
+            let elapsed = record.created_at.elapsed().unwrap_or_default().as_secs();
+            println!(
+                "  #{:<3} {:<10} {:<14} {:<20} {:<24} {} ({}s)",
+                record.id,
+                status,
+                record.service,
+                record.resource,
+                record.image,
+                record.detail,
+                elapsed
+            );
+            if let Some(error) = &record.error {
+                println!("       error: {error}");
+            }
+        }
+        println!();
+    }
+}
+
+fn format_progress(event: &OperationEvent) -> String {
+    match (event.current_bytes, event.total_bytes) {
+        (Some(current), Some(total)) if total > 0 => {
+            format!("{} ({current}/{total} bytes)", event.detail)
+        }
+        _ => event.detail.clone(),
+    }
 }
 
 /// Prompt the user for container customization options.
@@ -269,7 +528,7 @@ fn prompt_service_options(
     };
 
     let volume_name = if service.data_path.is_some() {
-        let def_vol = format!("asur-{}-data", service.name);
+        let def_vol = format!("{container_name}-data");
         let input = inquire::Text::new("Volume name:")
             .with_default(&def_vol)
             .prompt()
@@ -365,7 +624,7 @@ pub fn print_summary(summary: &LaunchSummary, copied_to_clipboard: bool) {
     let cyan_bold = Style::new().cyan().bold();
 
     let check = "✔".if_supports_color(Stream::Stdout, |t| t.style(green_bold));
-    let title = format!("{check} {} is running!", summary.service_name);
+    let title = format!("{check} {} is ready!", summary.service_name);
     println!("\n{title}");
 
     println!(

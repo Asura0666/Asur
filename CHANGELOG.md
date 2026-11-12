@@ -6,6 +6,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.1.0] – 2026-11-12
+
+### Added
+
+- **Polished terminal presentation**:
+  - Added shared headers, sections, aligned summaries, status messages, and terminal-mode fallback for rich, line-oriented, and plain output.
+  - Added global `--plain`, `--no-color`, and `--no-progress` presentation flags.
+  - Added elapsed-time spinners for indeterminate Docker and scanning work, plus determinate progress indicators where Docker reports byte totals.
+- **Concurrent `asur up` operations**:
+  - Queue multiple service launches without waiting for earlier pulls to complete.
+  - Added live operation inspection with per-service lifecycle state, Docker pull status, errors, and elapsed time.
+  - Docker pull events now update while waiting for operations, and progress is cleared before the final ready/error summary.
+
+### Changed
+
+- `asur scan` now reports streaming traversal progress and Git-history scan activity while preserving clean JSON output.
+- `asur clean` now uses coordinated inspection and cleanup status, aligned resource summaries, and clearly labels reclaimed space as an estimate.
+- Advanced container setup now defaults a named volume to `<container-name>-data`, including custom container names.
+
+### Fixed
+
+- Docker layer events are aggregated per operation to avoid resetting a pull display when Docker switches layers.
+- Prevented a completed pull bar from lingering during image extraction or readiness checks.
+
+---
+
 ## [1.0.3] – 2026-11-12
 
 ### Packaging & Distribution (crates.io readiness)

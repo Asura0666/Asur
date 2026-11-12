@@ -19,4 +19,4 @@ pub use mask::mask_secret;
 pub use rules::{Finding, SecretScanner};
 #[allow(unused_imports)]
 pub use walker::WorkingTreeReport;
-pub use walker::{SkippedFile, scan_working_tree};
+pub use walker::{SkippedFile, scan_working_tree_with_progress};

@@ -14,6 +14,7 @@ pub struct Finding {
     pub commit: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct SecretScanner {
     patterns: Vec<(&'static str, Regex)>,
     assignment_pattern: Regex,

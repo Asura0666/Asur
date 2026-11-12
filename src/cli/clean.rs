@@ -4,7 +4,6 @@ use std::io::IsTerminal;
 
 use anyhow::Result;
 use clap::Args;
-use owo_colors::{OwoColorize, Stream, Style};
 
 use crate::docker::{ContainerRuntime, DockerRuntime};
 use crate::ui;
@@ -28,8 +27,11 @@ pub async fn run(args: CleanArgs) -> Result<()> {
 }
 
 pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Result<()> {
+    ui::header("clean", None);
     let is_interactive = std::io::stdin().is_terminal();
+    let inspection = ui::Spinner::new("Inspecting Docker resources...");
     let report = runtime.get_clean_report().await?;
+    inspection.finish("Docker resource inspection complete.");
 
     let total_items = report.stopped_containers.len()
         + report.dangling_images.len()
@@ -47,37 +49,43 @@ pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Resul
     let volumes_bytes: i64 = report.unused_volumes.iter().map(|(_, s)| *s).sum();
     let total_reclaimable = containers_bytes + images_bytes + volumes_bytes;
 
-    println!();
-    ui::info("Scanned cleanable resources:");
+    ui::section("Cleanable resources");
+    let mut resource_rows = Vec::new();
     if !report.stopped_containers.is_empty() {
-        println!(
-            "  • Stopped containers : {} (~{})",
-            report.stopped_containers.len(),
-            format_bytes(containers_bytes)
-        );
+        resource_rows.push((
+            "Stopped containers",
+            format!(
+                "{} (~{})",
+                report.stopped_containers.len(),
+                format_bytes(containers_bytes)
+            ),
+        ));
     }
     if !report.dangling_images.is_empty() {
-        println!(
-            "  • Dangling images    : {} (~{})",
-            report.dangling_images.len(),
-            format_bytes(images_bytes)
-        );
+        resource_rows.push((
+            "Dangling images",
+            format!(
+                "{} (~{})",
+                report.dangling_images.len(),
+                format_bytes(images_bytes)
+            ),
+        ));
     }
     if !report.unused_volumes.is_empty() {
-        println!(
-            "  • Unused volumes     : {} (~{})",
-            report.unused_volumes.len(),
-            format_bytes(volumes_bytes)
-        );
+        resource_rows.push((
+            "Unused volumes",
+            format!(
+                "{} (~{})",
+                report.unused_volumes.len(),
+                format_bytes(volumes_bytes)
+            ),
+        ));
     }
-
-    let cyan_bold = Style::new().cyan().bold();
-    let space_styled = format!("~{}", format_bytes(total_reclaimable));
-    println!(
-        "  {} {}\n",
-        "Total reclaimable space:".if_supports_color(Stream::Stdout, |t| t.bold()),
-        space_styled.if_supports_color(Stream::Stdout, |t| t.style(cyan_bold))
-    );
+    resource_rows.push((
+        "Total reclaimable",
+        format!("~{}", format_bytes(total_reclaimable)),
+    ));
+    ui::key_values(&resource_rows);
 
     // 1. Dry run guard: preview only, never delete
     if args.dry_run {
@@ -208,24 +216,33 @@ pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Resul
         }
     }
 
-    ui::info("Cleaning selected resources...");
-    let mut results = runtime
+    let cleaning = ui::Spinner::new("Removing selected Docker resources...");
+    let results = runtime
         .clean_resources(&container_ids, &image_ids, &volume_names)
         .await?;
-    results.space_reclaimed_bytes = total_reclaim_bytes;
+    cleaning.finish("Docker cleanup finished.");
 
-    let green_bold = Style::new().green().bold();
-    let check = "✔".if_supports_color(Stream::Stdout, |t| t.style(green_bold));
-
-    println!(
-        "\n{check} Removed {} container(s), {} image(s), {} volume(s).",
+    ui::success(&format!(
+        "Removed {} container(s), {} image(s), {} volume(s).",
         results.containers_removed, results.images_removed, results.volumes_removed
-    );
-    if results.space_reclaimed_bytes > 0 {
-        println!(
-            "  Reclaimed ~{} of disk space.",
-            format_bytes(results.space_reclaimed_bytes)
-        );
+    ));
+    // Docker's delete endpoints do not report reclaimed bytes reliably. Never
+    // claim the selected estimate as an actual reclaim total when any item
+    // failed.
+    if results.failures.is_empty() && total_reclaim_bytes > 0 {
+        ui::hint(&format!(
+            "Estimated reclaimed space: ~{}.",
+            format_bytes(total_reclaim_bytes)
+        ));
+    }
+    if !results.failures.is_empty() {
+        ui::warn(&format!(
+            "{} resource(s) could not be removed:",
+            results.failures.len()
+        ));
+        for failure in &results.failures {
+            eprintln!("  • {failure}");
+        }
     }
     println!();
 
