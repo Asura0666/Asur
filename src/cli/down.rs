@@ -69,30 +69,35 @@ pub async fn execute<R: ContainerRuntime>(
 
     // Confirmation prompt (if not --yes and in interactive mode)
     if !args.yes && is_interactive {
+        print_selected_containers(&targets, &all_containers);
         if args.volumes {
             ui::warn(
                 "⚠️  Volume deletion is irreversible! All data inside attached volumes will be permanently lost.",
             );
         }
 
+        let noun = if targets.len() == 1 {
+            "container"
+        } else {
+            "containers"
+        };
         let action_desc = if args.stop_only {
-            format!("Stop {} container(s)", targets.len())
+            format!("Stop {} {noun}", targets.len())
         } else if args.volumes {
             format!(
-                "Stop and REMOVE {} container(s) and their VOLUMES",
+                "Stop and REMOVE {} {noun} and attached VOLUMES",
                 targets.len()
             )
         } else {
-            format!("Stop and remove {} container(s)", targets.len())
+            format!("Stop and remove {} {noun}", targets.len())
         };
 
-        let names_list = targets.join(", ");
-        let prompt_msg = format!("{action_desc} ({names_list})?");
+        let prompt_msg = format!("{action_desc} shown above?");
 
         let confirmed = inquire::Confirm::new(&prompt_msg)
             .with_default(false)
             .prompt()
-            .unwrap_or(false);
+            .map_err(super::prompt_error)?;
 
         if !confirmed {
             ui::info("Cancelled.");
@@ -149,19 +154,45 @@ fn select_containers_interactive(containers: &[ContainerInfo]) -> Result<Vec<Str
         .map(|c| format!("{:<20} {:<24} ({})", c.name, c.image, c.status))
         .collect();
 
-    let selected = inquire::MultiSelect::new(
-        "Select container(s) to take down (Space to select, Enter to confirm):",
-        options,
-    )
-    .prompt()
-    .map_err(|e| anyhow::anyhow!("selection cancelled: {e}"))?;
+    let selection_formatter =
+        |items: &[inquire::list_option::ListOption<&String>]| match items.len() {
+            1 => "1 container selected".to_string(),
+            count => format!("{count} containers selected"),
+        };
+    let selected = inquire::MultiSelect::new("Select containers to take down:", options.clone())
+        .with_help_message("Space: toggle  Enter: continue  Esc: cancel")
+        .with_formatter(&selection_formatter)
+        .prompt()
+        .map_err(super::prompt_error)?;
 
     let names = selected
         .into_iter()
-        .filter_map(|s| s.split_whitespace().next().map(str::to_string))
+        .filter_map(|selected_option| {
+            options
+                .iter()
+                .position(|option| option == &selected_option)
+                .and_then(|index| containers.get(index))
+                .map(|container| container.name.clone())
+        })
         .collect();
 
     Ok(names)
+}
+
+fn print_selected_containers(targets: &[String], containers: &[ContainerInfo]) {
+    ui::section("Selected containers");
+    for target in targets {
+        if let Some(container) = containers
+            .iter()
+            .find(|container| &container.name == target)
+        {
+            println!("  - {}", container.name);
+            println!("      Image  : {}", container.image);
+            println!("      Status : {}", container.status);
+        } else {
+            println!("  - {target}");
+        }
+    }
 }
 
 #[cfg(test)]

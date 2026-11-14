@@ -75,7 +75,7 @@ fn handle_example(from: &str, to: &str, yes: bool) -> Result<()> {
         let confirmed = inquire::Confirm::new(&format!("`{to}` already exists. Overwrite?"))
             .with_default(false)
             .prompt()
-            .unwrap_or(false);
+            .map_err(super::prompt_error)?;
 
         if !confirmed {
             ui::info("Cancelled.");

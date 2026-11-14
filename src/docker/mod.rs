@@ -5,12 +5,24 @@
 //! without changing calling code.
 
 mod bollard_impl;
+mod types;
 
 pub use bollard_impl::DockerRuntime;
+pub use types::{
+    ImageReference, Mount, MountKind, PortBinding, PortProtocol, PullPolicy, RestartPolicy,
+};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::SystemTime;
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Docker is not running. Start it and try again.\n\n  Windows: open Docker Desktop from the Start menu or system tray\n  macOS:   open Docker Desktop\n  Linux:   run `sudo systemctl start docker`"
+)]
+pub struct DockerUnavailable;
 
 /// Lifecycle update emitted by a long-running Docker operation.  Presentation
 /// code consumes these updates; runtimes never write directly to the terminal.
@@ -99,12 +111,65 @@ pub struct CreateContainerConfig {
     pub image: String,
     /// Environment variables in `"KEY=VALUE"` format.
     pub env: Vec<String>,
-    /// Port mappings: `(host_port, container_port)`.
-    pub ports: Vec<(u16, u16)>,
-    /// Named volume or host path bindings: `(volume_name, container_path)`.
-    pub volumes: Vec<(String, String)>,
+    /// Explicit host-to-container port mappings.
+    pub ports: Vec<PortBinding>,
+    /// Named-volume or bind mounts.
+    pub mounts: Vec<Mount>,
+    /// Docker network name or network mode.
+    pub network: Option<String>,
+    /// Container restart behavior.
+    pub restart: RestartPolicy,
+    /// Whether the runtime may pull the image.
+    pub pull_policy: PullPolicy,
+    /// Whether to probe the first published TCP port for readiness. Generic
+    /// images leave this disabled because Asur cannot assume their semantics.
+    pub probe_readiness: bool,
     /// Command override (e.g. `["redis-server", "--requirepass", "secret"]`).
     pub command: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageMetadata {
+    pub reference: String,
+    pub id: String,
+    pub digests: Vec<String>,
+    pub labels: BTreeMap<String, String>,
+    pub exposed_ports: Vec<String>,
+    pub declared_volumes: Vec<String>,
+    pub entrypoint: Vec<String>,
+    pub command: Vec<String>,
+    pub architecture: String,
+    pub os: String,
+    pub size: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalImage {
+    pub id: String,
+    pub tags: Vec<String>,
+    pub digests: Vec<String>,
+    pub size: i64,
+    pub created: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageSearchResult {
+    pub source: String,
+    pub name: String,
+    pub description: String,
+    pub official: Option<bool>,
+    pub verified: Option<bool>,
+    pub pulls: Option<u64>,
+    pub tags: Vec<String>,
+    pub size: Option<i64>,
+    pub architecture: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageTag {
+    pub name: String,
+    pub size: Option<i64>,
+    pub platforms: Vec<String>,
 }
 
 /// Summary of unused resources that can be cleaned.
@@ -140,6 +205,47 @@ pub trait ContainerRuntime: Send + Sync {
     /// List containers. When `all` is `true` stopped containers are included.
     fn list_containers(&self, all: bool)
     -> impl Future<Output = Result<Vec<ContainerInfo>>> + Send;
+
+    /// Search the runtime's configured public registry provider.
+    fn search_images(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> impl Future<Output = Result<Vec<ImageSearchResult>>> + Send {
+        async { anyhow::bail!("this container runtime does not support image search") }
+    }
+
+    /// List tags published for a Docker Hub repository.
+    fn list_image_tags(
+        &self,
+        _repository: &str,
+        _limit: usize,
+    ) -> impl Future<Output = Result<Vec<ImageTag>>> + Send {
+        async { anyhow::bail!("this container runtime does not support image tag discovery") }
+    }
+
+    /// List images stored by the local runtime.
+    fn list_images(&self) -> impl Future<Output = Result<Vec<LocalImage>>> + Send {
+        async { anyhow::bail!("this container runtime does not support listing images") }
+    }
+
+    /// Inspect an image already present in the local runtime.
+    fn inspect_image(
+        &self,
+        _reference: &str,
+    ) -> impl Future<Output = Result<ImageMetadata>> + Send {
+        async { anyhow::bail!("this container runtime does not support image inspection") }
+    }
+
+    /// Apply a pull policy and return immutable/local image metadata.
+    fn prepare_image(
+        &self,
+        _reference: &ImageReference,
+        _pull_policy: PullPolicy,
+        _events: tokio::sync::mpsc::UnboundedSender<OperationEvent>,
+    ) -> impl Future<Output = Result<ImageMetadata>> + Send {
+        async { anyhow::bail!("this container runtime does not support image pulls") }
+    }
 
     /// Create and run a new container from the given configuration.
     /// Pulls the image if it is not present locally.

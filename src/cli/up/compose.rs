@@ -11,14 +11,22 @@ pub fn generate_compose_yaml(services: &[LaunchSummary]) -> String {
         out.push_str(&format!("  {}:\n", s.service_name));
         out.push_str(&format!("    image: {}\n", s.image));
         out.push_str(&format!("    container_name: {}\n", s.container_name));
-        out.push_str("    restart: unless-stopped\n");
+        out.push_str(&format!("    restart: {}\n", s.restart));
+
+        if let Some(network) = &s.network {
+            out.push_str(&format!("    network_mode: {network}\n"));
+        }
 
         if let Some(cmd) = &s.command {
             out.push_str(&format!("    command: {}\n", cmd.join(" ")));
         }
 
-        out.push_str("    ports:\n");
-        out.push_str(&format!("      - \"{}:{}\"\n", s.port, s.container_port));
+        if !s.ports.is_empty() {
+            out.push_str("    ports:\n");
+            for port in &s.ports {
+                out.push_str(&format!("      - \"{port}\"\n"));
+            }
+        }
 
         if !s.env.is_empty() {
             out.push_str("    environment:\n");
@@ -27,12 +35,14 @@ pub fn generate_compose_yaml(services: &[LaunchSummary]) -> String {
             }
         }
 
-        if !s.volumes.is_empty() {
+        if !s.mounts.is_empty() {
             out.push_str("    volumes:\n");
-            for (vol_name, container_path) in &s.volumes {
-                out.push_str(&format!("      - {vol_name}:{container_path}\n"));
-                if !all_volumes.contains(vol_name) {
-                    all_volumes.push(vol_name.clone());
+            for mount in &s.mounts {
+                out.push_str(&format!("      - {mount}\n"));
+                if mount.kind == crate::docker::MountKind::Volume
+                    && !all_volumes.contains(&mount.source)
+                {
+                    all_volumes.push(mount.source.clone());
                 }
             }
         }
@@ -53,6 +63,7 @@ pub fn generate_compose_yaml(services: &[LaunchSummary]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::docker::{Mount, PortBinding, RestartPolicy};
 
     #[test]
     fn test_generate_compose() {
@@ -60,26 +71,30 @@ mod tests {
             service_name: "redis".into(),
             container_name: "my-redis".into(),
             image: "redis:7-alpine".into(),
-            port: 6380,
-            container_port: 6379,
+            ports: vec![PortBinding::tcp(6380, 6379)],
             user: None,
             password: Some("secret123".into()),
             database: None,
-            connection_string: "redis://:secret123@localhost:6380".into(),
+            connection_string: Some("redis://:secret123@localhost:6380".into()),
             env: vec![],
-            volumes: vec![("my-redis-data".into(), "/data".into())],
+            mounts: vec![Mount::volume("my-redis-data", "/data")],
+            network: None,
+            restart: RestartPolicy::UnlessStopped,
             command: Some(vec![
                 "redis-server".into(),
                 "--requirepass".into(),
                 "secret123".into(),
             ]),
+            resolved_digest: None,
+            pin: false,
+            generic: false,
         }];
 
         let yaml = generate_compose_yaml(&summaries);
         assert!(yaml.contains("services:"));
         assert!(yaml.contains("image: redis:7-alpine"));
         assert!(yaml.contains("container_name: my-redis"));
-        assert!(yaml.contains("6380:6379"));
+        assert!(yaml.contains("6380:6379/tcp"));
         assert!(yaml.contains("command: redis-server --requirepass secret123"));
         assert!(yaml.contains("volumes:"));
         assert!(yaml.contains("my-redis-data:/data"));

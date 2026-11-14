@@ -27,7 +27,6 @@ pub async fn run(args: CleanArgs) -> Result<()> {
 }
 
 pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Result<()> {
-    ui::header("clean", None);
     let is_interactive = std::io::stdin().is_terminal();
     let inspection = ui::Spinner::new("Inspecting Docker resources...");
     let report = runtime.get_clean_report().await?;
@@ -104,33 +103,38 @@ pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Resul
     // Build selectable options
     // Format: "[C] name (size)", "[I] tag (size)", "[V] name (size)"
     let mut options = Vec::new();
-    let mut item_meta = Vec::new(); // (type: 'C'/'I'/'V', id_or_name: String, size: i64)
+    // (type, Docker id/name, display name, size)
+    let mut item_meta = Vec::new();
 
     for (id, name, size) in &report.stopped_containers {
         let label = format!("[Container] {:<24} ({})", name, format_bytes(*size));
         options.push(label);
-        item_meta.push(('C', id.clone(), *size));
+        item_meta.push(('C', id.clone(), name.clone(), *size));
     }
 
     for (id, tag, size) in &report.dangling_images {
         let label = format!("[Image]     {:<24} ({})", tag, format_bytes(*size));
         options.push(label);
-        item_meta.push(('I', id.clone(), *size));
+        item_meta.push(('I', id.clone(), tag.clone(), *size));
     }
 
     for (name, size) in &report.unused_volumes {
         let label = format!("[Volume]    {:<24} ({})", name, format_bytes(*size));
         options.push(label);
-        item_meta.push(('V', name.clone(), *size));
+        item_meta.push(('V', name.clone(), name.clone(), *size));
     }
 
     let selected_indices = if is_interactive && !args.yes {
-        let selected = inquire::MultiSelect::new(
-            "Select resources to remove (Space to toggle, Enter to confirm):",
-            options.clone(),
-        )
-        .prompt()
-        .map_err(|e| anyhow::anyhow!("selection cancelled: {e}"))?;
+        let selection_formatter =
+            |items: &[inquire::list_option::ListOption<&String>]| match items.len() {
+                1 => "1 resource selected".to_string(),
+                count => format!("{count} resources selected"),
+            };
+        let selected = inquire::MultiSelect::new("Select resources to remove:", options.clone())
+            .with_help_message("Space: toggle  Enter: continue  Esc: cancel")
+            .with_formatter(&selection_formatter)
+            .prompt()
+            .map_err(super::prompt_error)?;
 
         if selected.is_empty() {
             ui::info("No items selected.");
@@ -149,7 +153,7 @@ pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Resul
         // Always select containers and images.
         // VOLUMES ARE ONLY SELECTED IF EXPLICITLY REQUESTED WITH --volumes / -v!
         let mut indices = Vec::new();
-        for (i, (kind, _, _)) in item_meta.iter().enumerate() {
+        for (i, (kind, _, _, _)) in item_meta.iter().enumerate() {
             if *kind == 'V' {
                 if args.volumes {
                     indices.push(i);
@@ -178,8 +182,12 @@ pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Resul
     let mut volume_names = Vec::new();
     let mut total_reclaim_bytes: i64 = 0;
 
+    if !args.yes && is_interactive {
+        print_selected_resources(&selected_indices, &item_meta);
+    }
+
     for idx in selected_indices {
-        let (kind, id_or_name, size) = &item_meta[idx];
+        let (kind, id_or_name, _, size) = &item_meta[idx];
         total_reclaim_bytes += size;
         match kind {
             'C' => container_ids.push(id_or_name.clone()),
@@ -208,7 +216,7 @@ pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Resul
         let confirmed = inquire::Confirm::new(&prompt_msg)
             .with_default(false)
             .prompt()
-            .unwrap_or(false);
+            .map_err(super::prompt_error)?;
 
         if !confirmed {
             ui::info("Clean cancelled.");
@@ -247,6 +255,30 @@ pub async fn execute<R: ContainerRuntime>(args: CleanArgs, runtime: &R) -> Resul
     println!();
 
     Ok(())
+}
+
+fn print_selected_resources(selected: &[usize], items: &[(char, String, String, i64)]) {
+    ui::section("Selected for removal");
+    for kind in ['C', 'I', 'V'] {
+        let heading = match kind {
+            'C' => "Containers",
+            'I' => "Images",
+            'V' => "Volumes",
+            _ => continue,
+        };
+        let matches: Vec<_> = selected
+            .iter()
+            .filter_map(|index| items.get(*index))
+            .filter(|(item_kind, _, _, _)| *item_kind == kind)
+            .collect();
+        if matches.is_empty() {
+            continue;
+        }
+        println!("  {heading} ({})", matches.len());
+        for (_, _, name, size) in matches {
+            println!("    - {name}  ({})", format_bytes(*size));
+        }
+    }
 }
 
 /// Convert bytes into human-readable string (KB, MB, GB).

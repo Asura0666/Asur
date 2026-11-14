@@ -298,7 +298,7 @@ pub async fn run(args: ScanArgs) -> Result<()> {
     // Warnings and remediation
     println!(
         "{} Remediation steps:",
-        "›".if_supports_color(Stream::Stdout, |t| t.cyan())
+        "›".if_supports_color(Stream::Stdout, |t| t.green())
     );
     println!(
         "  1. {}",
@@ -362,7 +362,7 @@ fn offer_gitignore_remediation(
         inquire::Confirm::new("Add these file(s) to `.gitignore`?")
             .with_default(true)
             .prompt()
-            .unwrap_or(false)
+            .map_err(super::prompt_error)?
     };
 
     if should_add {

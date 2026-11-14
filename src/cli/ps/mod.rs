@@ -86,7 +86,12 @@ mod tests {
                 ports: config
                     .ports
                     .iter()
-                    .map(|(h, c)| format!("0.0.0.0:{h}->{c}/tcp"))
+                    .map(|binding| {
+                        format!(
+                            "0.0.0.0:{}->{}/{}",
+                            binding.host_port, binding.container_port, binding.protocol
+                        )
+                    })
                     .collect(),
                 created: 1000,
             })

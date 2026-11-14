@@ -4,7 +4,9 @@
 //! without touching Docker.
 
 use crate::catalog::Service;
-use crate::docker::CreateContainerConfig;
+use crate::docker::{
+    CreateContainerConfig, ImageReference, Mount, PortBinding, PullPolicy, RestartPolicy,
+};
 use crate::util::password::generate_password;
 
 /// User overrides for configuring a service container.
@@ -24,15 +26,34 @@ pub struct LaunchSummary {
     pub service_name: String,
     pub container_name: String,
     pub image: String,
-    pub port: u16,
-    pub container_port: u16,
+    pub ports: Vec<PortBinding>,
     pub user: Option<String>,
     pub password: Option<String>,
     pub database: Option<String>,
-    pub connection_string: String,
+    pub connection_string: Option<String>,
     pub env: Vec<String>,
-    pub volumes: Vec<(String, String)>,
+    pub mounts: Vec<Mount>,
+    pub network: Option<String>,
+    pub restart: RestartPolicy,
     pub command: Option<Vec<String>>,
+    pub resolved_digest: Option<String>,
+    pub pin: bool,
+    pub generic: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenericOptions {
+    pub image: ImageReference,
+    pub container_name: String,
+    pub env: Vec<String>,
+    pub ports: Vec<PortBinding>,
+    pub mounts: Vec<Mount>,
+    pub network: Option<String>,
+    pub restart: RestartPolicy,
+    pub command: Option<Vec<String>>,
+    pub pull_policy: PullPolicy,
+    pub resolved_digest: Option<String>,
+    pub pin: bool,
 }
 
 /// Build container configuration with optional user customizations.
@@ -107,13 +128,13 @@ pub fn build_container_config(
     };
 
     // Named volume for data persistence if data path is defined
-    let mut volumes = Vec::new();
+    let mut mounts = Vec::new();
     if let Some(data_path) = &service.data_path {
         let vol_name = options
             .volume_name
             .clone()
             .unwrap_or_else(|| format!("asur-{}-data", service.name));
-        volumes.push((vol_name, data_path.clone()));
+        mounts.push(Mount::volume(vol_name, data_path.clone()));
     }
 
     // Build connection string
@@ -128,8 +149,12 @@ pub fn build_container_config(
         name: container_name.clone(),
         image: image.clone(),
         env,
-        ports: vec![(port, service.default_port)],
-        volumes,
+        ports: vec![PortBinding::tcp(port, service.default_port)],
+        mounts,
+        network: None,
+        restart: RestartPolicy::UnlessStopped,
+        pull_policy: PullPolicy::Missing,
+        probe_readiness: true,
         command,
     };
 
@@ -137,18 +162,63 @@ pub fn build_container_config(
         service_name: service.name.clone(),
         container_name,
         image,
-        port,
-        container_port: service.default_port,
+        ports: container_config.ports.clone(),
         user,
         password,
         database,
-        connection_string,
+        connection_string: Some(connection_string),
         env: container_config.env.clone(),
-        volumes: container_config.volumes.clone(),
+        mounts: container_config.mounts.clone(),
+        network: container_config.network.clone(),
+        restart: container_config.restart,
         command: container_config.command.clone(),
+        resolved_digest: None,
+        pin: false,
+        generic: false,
     };
 
     (container_config, summary)
+}
+
+pub fn build_generic_config(options: GenericOptions) -> (CreateContainerConfig, LaunchSummary) {
+    let image = options.image.to_string();
+    let config = CreateContainerConfig {
+        name: options.container_name.clone(),
+        image: image.clone(),
+        env: options.env,
+        ports: options.ports,
+        mounts: options.mounts,
+        network: options.network,
+        restart: options.restart,
+        pull_policy: options.pull_policy,
+        probe_readiness: false,
+        command: options.command,
+    };
+    let summary = LaunchSummary {
+        service_name: options
+            .image
+            .repository()
+            .rsplit('/')
+            .next()
+            .unwrap_or("image")
+            .to_string(),
+        container_name: config.name.clone(),
+        image,
+        ports: config.ports.clone(),
+        user: None,
+        password: None,
+        database: None,
+        connection_string: None,
+        env: config.env.clone(),
+        mounts: config.mounts.clone(),
+        network: config.network.clone(),
+        restart: config.restart,
+        command: config.command.clone(),
+        resolved_digest: options.resolved_digest,
+        pin: options.pin,
+        generic: true,
+    };
+    (config, summary)
 }
 
 /// Build container configuration and connection details for quick mode.
@@ -168,21 +238,23 @@ mod tests {
         let (config, summary) = build_quick_config(pg);
 
         assert_eq!(config.name, "asur-postgres");
-        assert_eq!(config.ports, vec![(5432, 5432)]);
+        assert_eq!(config.ports, vec![PortBinding::tcp(5432, 5432)]);
         assert!(config.image.starts_with("postgres:"));
         assert!(summary.password.is_some());
         let pass = summary.password.unwrap();
         assert_eq!(pass.len(), 16);
         assert!(config.env.contains(&format!("POSTGRES_PASSWORD={pass}")));
         assert!(config.env.contains(&"POSTGRES_USER=postgres".to_string()));
-        assert!(summary.connection_string.contains(&pass));
+        assert!(summary.connection_string.as_ref().unwrap().contains(&pass));
         assert!(
             summary
                 .connection_string
+                .as_ref()
+                .unwrap()
                 .starts_with("postgres://postgres:")
         );
-        assert_eq!(config.volumes.len(), 1);
-        assert_eq!(config.volumes[0].0, "asur-postgres-data");
+        assert_eq!(config.mounts.len(), 1);
+        assert_eq!(config.mounts[0].source, "asur-postgres-data");
     }
 
     #[test]
@@ -198,10 +270,57 @@ mod tests {
         let (config, summary) = build_container_config(redis, &custom);
 
         assert_eq!(config.name, "my-custom-redis");
-        assert_eq!(config.ports, vec![(6380, 6379)]);
-        assert_eq!(summary.port, 6380);
+        assert_eq!(config.ports, vec![PortBinding::tcp(6380, 6379)]);
         assert_eq!(summary.password, Some("mypassword".into()));
-        assert!(summary.connection_string.contains("localhost:6380"));
-        assert!(summary.connection_string.contains(":mypassword@"));
+        assert!(
+            summary
+                .connection_string
+                .as_ref()
+                .unwrap()
+                .contains("localhost:6380")
+        );
+        assert!(
+            summary
+                .connection_string
+                .as_ref()
+                .unwrap()
+                .contains(":mypassword@")
+        );
+    }
+
+    #[test]
+    fn generic_config_preserves_all_runtime_controls() {
+        let options = GenericOptions {
+            image: "ghcr.io/acme/api:1.4".parse().unwrap(),
+            container_name: "api".into(),
+            env: vec!["MODE=test".into()],
+            ports: vec![
+                "127.0.0.1:8080:80/tcp".parse().unwrap(),
+                "5353:53/udp".parse().unwrap(),
+            ],
+            mounts: vec!["cache:/cache:ro".parse().unwrap()],
+            network: Some("devnet".into()),
+            restart: RestartPolicy::OnFailure {
+                maximum_retry_count: 3,
+            },
+            command: Some(vec!["serve".into(), "--debug".into()]),
+            pull_policy: PullPolicy::Always,
+            resolved_digest: Some(format!("ghcr.io/acme/api@sha256:{}", "a".repeat(64))),
+            pin: true,
+        };
+        let (config, summary) = build_generic_config(options);
+        assert_eq!(config.ports.len(), 2);
+        assert!(config.mounts[0].read_only);
+        assert_eq!(config.network.as_deref(), Some("devnet"));
+        assert_eq!(
+            config.restart,
+            RestartPolicy::OnFailure {
+                maximum_retry_count: 3
+            }
+        );
+        assert_eq!(config.pull_policy, PullPolicy::Always);
+        assert!(!config.probe_readiness);
+        assert!(summary.pin);
+        assert!(summary.generic);
     }
 }

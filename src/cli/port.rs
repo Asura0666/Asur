@@ -59,7 +59,10 @@ pub async fn execute<R: ContainerRuntime>(args: PortArgs, runtime: Option<&R>) -
         }
         (None, Some(port)) => handle_port_inspect(port, args.kill, args.yes, runtime).await,
         (None, None) => {
-            bail!("give a port to inspect (e.g. `asur port 3000`) or use `asur port free 3000`");
+            ui::info("Choose a port operation:");
+            ui::hint("Inspect a port : asur port 3000");
+            ui::hint("Find a free one: asur port free 3000");
+            Ok(())
         }
     }
 }
@@ -155,7 +158,7 @@ async fn handle_port_inspect<R: ContainerRuntime>(
             ))
             .with_default(false)
             .prompt()
-            .unwrap_or(false)
+            .map_err(super::prompt_error)?
         };
 
         if should_stop {
@@ -214,7 +217,7 @@ async fn handle_port_inspect<R: ContainerRuntime>(
             ))
             .with_default(false)
             .prompt()
-            .unwrap_or(false)
+            .map_err(super::prompt_error)?
         };
 
         if should_kill {
@@ -408,6 +411,12 @@ pub fn kill_process(pid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn no_port_prints_guidance_without_failing() {
+        let result = execute::<DockerRuntime>(PortArgs::default(), None).await;
+        assert!(result.is_ok());
+    }
 
     #[test]
     fn test_parse_netstat_listening() {

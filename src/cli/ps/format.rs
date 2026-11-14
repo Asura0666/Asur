@@ -166,7 +166,7 @@ pub fn render_table(containers: &[ContainerInfo]) -> String {
     if containers.is_empty() {
         return format!(
             "{} No containers found. Run `asur up <service>` to start one.",
-            "›".if_supports_color(Stream::Stdout, |t| t.cyan())
+            "›".if_supports_color(Stream::Stdout, |t| t.green())
         );
     }
 

@@ -278,7 +278,7 @@ fn process_ignore_file(
         inquire::Confirm::new(&format!("Update `{file_name}`?"))
             .with_default(true)
             .prompt()
-            .unwrap_or(false)
+            .map_err(super::prompt_error)?
     };
 
     if should_apply {

@@ -83,8 +83,9 @@ fn select_running_container_interactive(containers: &[ContainerInfo]) -> Result<
         .collect();
 
     let choice = inquire::Select::new("Select a running container to open a shell in:", options)
+        .with_help_message("Esc: cancel and exit")
         .prompt()
-        .map_err(|e| anyhow::anyhow!("selection cancelled: {e}"))?;
+        .map_err(super::prompt_error)?;
 
     let name = choice
         .split_whitespace()

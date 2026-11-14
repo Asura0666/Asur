@@ -35,6 +35,24 @@ pub fn configure(plain: bool, no_color: bool, no_progress: bool) {
             no_progress,
         };
     }
+
+    // Inquire's default theme uses cyan for answers and highlighted options.
+    // Keep prompts consistent with Asur's green/neutral palette and preserve a
+    // completely unstyled mode for --no-color, --plain, and NO_COLOR.
+    let no_color = plain || no_color || std::env::var_os("NO_COLOR").is_some();
+    let prompt_config = if no_color {
+        inquire::ui::RenderConfig::empty()
+    } else {
+        use inquire::ui::{Color, StyleSheet, Styled};
+
+        let mut config = inquire::ui::RenderConfig::default_colored();
+        config.answer = StyleSheet::new().with_fg(Color::LightGreen);
+        config.highlighted_option_prefix = Styled::new(">").with_fg(Color::LightGreen);
+        config.selected_option = Some(StyleSheet::new().with_fg(Color::LightGreen));
+        config.help_message = StyleSheet::new().with_fg(Color::DarkGrey);
+        config
+    };
+    inquire::set_global_render_config(prompt_config);
 }
 
 fn options() -> Options {
@@ -73,7 +91,7 @@ pub fn header(command: &str, context: Option<&str>) {
         |value| format!("ASUR / {command} / {value}"),
     );
     if color() {
-        println!("{}", title.cyan().bold());
+        println!("{}", title.green().bold());
     } else {
         println!("{title}");
     }
@@ -127,7 +145,7 @@ impl Spinner {
         }
         let progress = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
         progress.set_style(
-            ProgressStyle::with_template("{spinner:.cyan} {msg} [{elapsed_precise}]")
+            ProgressStyle::with_template("{spinner:.green} {msg} [{elapsed_precise}]")
                 .unwrap_or_else(|_| ProgressStyle::default_spinner()),
         );
         progress.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -148,6 +166,12 @@ impl Spinner {
             success(message.as_ref());
         }
     }
+
+    pub fn clear(&self) {
+        if let Some(progress) = &self.progress {
+            progress.finish_and_clear();
+        }
+    }
 }
 
 /// A determinate indicator.  Call this only when the total is authoritative;
@@ -166,7 +190,7 @@ impl Progress {
         let progress = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
         progress.set_style(
             ProgressStyle::with_template(
-                "{msg:.cyan} [{bar:30.cyan/blue}] {pos}% [{elapsed_precise}]",
+                "{msg:.green} [{bar:30.green/white}] {pos}% [{elapsed_precise}]",
             )
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
@@ -194,6 +218,12 @@ impl Progress {
             success(message.as_ref());
         }
     }
+
+    pub fn clear(&self) {
+        if let Some(progress) = &self.progress {
+            progress.finish_and_clear();
+        }
+    }
 }
 
 pub fn not_implemented(command: &str, milestone: &str) {
@@ -205,21 +235,33 @@ pub fn not_implemented(command: &str, milestone: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static UI_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+        UI_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn explicit_plain_mode_wins() {
+        let _guard = test_guard();
         configure(true, false, false);
         assert_eq!(render_mode(), RenderMode::Plain);
     }
 
     #[test]
     fn no_progress_uses_line_renderer() {
+        let _guard = test_guard();
         configure(false, false, true);
         assert_eq!(render_mode(), RenderMode::Lines);
     }
 
     #[test]
     fn progress_accepts_authoritative_total() {
+        let _guard = test_guard();
         configure(false, false, true);
         let progress = Progress::new("Downloading image", 42);
         progress.set_percent(42);

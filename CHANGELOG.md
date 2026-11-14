@@ -6,6 +6,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.2.0] – 2026-11-14
+
+### Added
+
+- Universal `asur up` support for tagged, qualified, digest-pinned, private, local, and explicitly selected OCI images.
+- Generic runtime controls for multiple TCP/UDP publications, host bindings, environment files and overrides, typed read-only mounts, networks, restart policies, command overrides, and pull policies.
+- `asur image search`, `asur image ls`, and `asur image inspect` for Docker Hub discovery and local image metadata.
+- Docker Hub tag discovery, compact search results, public-pull fallback for stale credentials, and clearer cleanup previews.
+- Immutable digest display and `--pin` persistence in `.asur.toml`.
+- Docker `config.json`, per-registry helper, and global credential-store integration without Asur-owned secret storage.
+
+### Changed
+
+- Replaced tuple-based port and volume configuration with validated `PortBinding`, `Mount`, `ImageReference`, `RestartPolicy`, and `PullPolicy` types shared by presets and generic images.
+- Unknown bare targets now require explicit raw-image selection, preventing catalog typos from silently pulling unrelated repositories.
+- Container launch failures now produce a failing command exit status after all queued operations finish.
+- Simplified Docker Hub search output and added clear official/exact-match labels and command-purpose guidance.
+- Replaced cyan terminal accents with a more readable green palette.
+- Replaced bottom-of-list exit entries with a consistent, visible Esc shortcut.
+- Docker Hub image selection now prioritizes stable version tags and hides release candidates and CPU-specific builds from the normal picker.
+- `image tag` now aliases `image tags`; bare names resolve through Docker Hub search, and the default output shows a short semantically sorted stable-version list (`--all` exposes raw tags).
+- Declared image ports are selected for host publishing by default and can be unselected interactively.
+
+### Fixed
+
+- Untagged Docker Hub selections now pull only `latest`; the Docker API's empty-tag behavior previously pulled every tag.
+- Generic-image preparation now renders aggregate layer download progress.
+- Ctrl+C and prompt cancellation now exit cleanly, including during image pulls.
+- Interactive Docker-not-running diagnostics and an empty `asur port` invocation now return cleanly without Cargo's process-failure footer.
+- Bare local image inspection resolves installed tags, and interactive not-found results return with actionable guidance.
+- `asur down` now prints a readable container-by-container removal preview instead of echoing the entire selection on one wrapped line.
+- Showing operation status now returns to the action menu instead of unexpectedly opening a new service selector.
+
+---
+
 ## [1.1.0] – 2026-11-12
 
 ### Added

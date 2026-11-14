@@ -1,4 +1,4 @@
-# Asur v1.1.0
+# Asur v1.2.0
 
 > One fast, single-binary CLI for everyday local dev — spin up containers, resolve port conflicts, sync `.env` files, and catch leaked secrets.
 
@@ -46,6 +46,17 @@ cargo install --path .
 # Spin up a postgres and redis with one command
 asur up postgres redis
 
+# Run any public, private, or locally built OCI image
+asur up --image nginx:1.27-alpine --publish 8080:80
+
+# Discover and inspect images
+asur image search nginx
+asur image tags nginx
+# `tag` is also accepted; add --all for RC and CPU-specific tags
+asur image tag typesense
+asur image ls
+asur image inspect nginx:1.27-alpine
+
 # See all running containers
 asur ps
 
@@ -65,7 +76,12 @@ asur ignore
 
 | Command | Description |
 |---|---|
-| `asur up <service...>` | Spin up containers with an interactive wizard |
+| `asur up <target...>` | Run catalog presets or qualified OCI image references |
+| `asur up --image <reference>` | Explicitly run any public, private, or local image |
+| `asur image search <query>` | Discover Docker Hub repository names and official-image status |
+| `asur image tags <repository-or-name>` | List stable pullable tags (`tag` alias; `--all` includes raw variants) |
+| `asur image ls` | See which images are already downloaded locally |
+| `asur image inspect <reference>` | Show a local image's digest, ports, volumes, entrypoint, and command |
 | `asur ps` | List containers in a readable table |
 | `asur down [containers...]` | Stop and remove containers (`-y / --yes` in scripts, `-v` for volumes) |
 | `asur logs [container]` | Pick a container and stream its logs |
@@ -86,6 +102,16 @@ asur ignore
 ### Supported services for `asur up`
 
 `postgres` · `redis` · `mysql` · `mariadb` · `mongodb` · `rabbitmq` · `kafka` · `minio` · `elasticsearch`
+
+Catalog names keep their guided defaults. A tagged, path-qualified, or digest-pinned reference such as `redis:7-alpine`, `ghcr.io/acme/orders:1.4`, or `repo/image@sha256:...` automatically uses generic-image mode. Unknown bare names require `--image` in non-interactive use so a catalog typo never silently pulls another repository.
+
+Generic-image mode supports repeatable `--publish`, `--env`, `--env-file`, and `--mount` options, plus `--name`, `--network`, `--restart`, `--command`, `--pull missing|always|never`, and `--pin`. Publishing maps a port inside the container to a host port so browsers and programs on your computer can reach the service. Image-declared ports are selected for publishing by default in the interactive wizard and can be unselected with Space. Declared volumes remain opt-in.
+
+An image reference without a tag means exactly `:latest`; Asur never interprets it as a request to pull every repository tag. Docker Hub selection prioritizes stable numeric versions and hides pre-release and CPU-specific variants. Docker Hub does not provide LTS metadata, so confirm long-term support in the image publisher's release notes. Press **Esc** in any interactive menu, or Ctrl+C at any time, to exit cleanly.
+
+`asur image inspect redis` resolves downloaded tags such as `redis:7-alpine`; when several local tags match, Asur asks which one to inspect.
+
+Private pulls use the standard Docker `config.json` and Docker credential-helper protocol. Sign in with `docker login [registry]`; Asur does not create credential storage or print registry tokens.
 
 ### Supported shells for `asur completions`
 
