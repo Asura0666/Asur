@@ -6,11 +6,13 @@
 mod clean;
 mod completions;
 mod db;
+mod dev;
 mod doctor;
 mod down;
 mod env;
 mod ignore;
 mod image;
+mod init;
 mod logs;
 mod port;
 mod ps;
@@ -73,6 +75,10 @@ pub enum Commands {
     Clean(clean::CleanArgs),
     /// Search, list, and inspect OCI images
     Image(image::ImageArgs),
+    /// Create a shareable .asur.toml from the current project
+    Init(init::InitArgs),
+    /// Run and manage the stack defined in .asur.toml
+    Dev(dev::DevArgs),
     /// See who is using a port, or find the next free one
     Port(port::PortArgs),
     /// Work with .env files: generate .env.example, diff, validate
@@ -97,6 +103,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Db(args) => db::run(args).await,
         Commands::Clean(args) => clean::run(args).await,
         Commands::Image(args) => image::run(args).await,
+        Commands::Init(args) => init::run(args).await,
+        Commands::Dev(args) => dev::run(args).await,
         Commands::Port(args) => port::run(args).await,
         Commands::Env(args) => env::run(args).await,
         Commands::Scan(args) => scan::run(args).await,

@@ -1,4 +1,4 @@
-# Asur v1.2.0
+# Asur v1.3.0
 
 > One fast, single-binary CLI for everyday local dev — spin up containers, resolve port conflicts, sync `.env` files, and catch leaked secrets.
 
@@ -11,6 +11,21 @@
 ```bash
 cargo install asur
 ```
+
+### Via WinGet
+
+```powershell
+winget install Asura0666.Asur
+```
+
+### Via Homebrew
+
+```bash
+brew tap Asura0666/tap
+brew install asur
+```
+
+Package-manager publication requires the one-time maintainer setup documented in [PUBLISHING.md](PUBLISHING.md). Until the first WinGet submission and Homebrew tap workflow have completed, use Cargo or the release archives below.
 
 ### Pre-built binary
 
@@ -68,6 +83,11 @@ asur scan
 
 # Generate a .gitignore for your project type
 asur ignore
+
+# Discover a shareable project environment, then run it
+asur init
+asur dev up
+asur dev status
 ```
 
 ---
@@ -82,6 +102,12 @@ asur ignore
 | `asur image tags <repository-or-name>` | List stable pullable tags (`tag` alias; `--all` includes raw variants) |
 | `asur image ls` | See which images are already downloaded locally |
 | `asur image inspect <reference>` | Show a local image's digest, ports, volumes, entrypoint, and command |
+| `asur init` | Discover Compose, env keys, and Asur containers and create `.asur.toml` |
+| `asur dev up [--profile <name>]` | Start a project stack in dependency-safe concurrent waves |
+| `asur dev status [--json]` | Show the state of services declared in `.asur.toml` |
+| `asur dev logs [service]` | View or follow logs by project service name |
+| `asur dev down [-y] [--volumes]` | Stop and remove only this project's containers |
+| `asur dev export [-o <file>]` | Export a secret-safe Compose file |
 | `asur ps` | List containers in a readable table |
 | `asur down [containers...]` | Stop and remove containers (`-y / --yes` in scripts, `-v` for volumes) |
 | `asur logs [container]` | Pick a container and stream its logs |
@@ -112,6 +138,31 @@ An image reference without a tag means exactly `:latest`; Asur never interprets 
 `asur image inspect redis` resolves downloaded tags such as `redis:7-alpine`; when several local tags match, Asur asks which one to inspect.
 
 Private pulls use the standard Docker `config.json` and Docker credential-helper protocol. Sign in with `docker login [registry]`; Asur does not create credential storage or print registry tokens.
+
+## Shareable project environments
+
+Run `asur init` from a project root to preview and create a versioned `.asur.toml`. The manifest can combine built-in presets and arbitrary images, declare dependency order and profiles, and reference keys from `.env` files without storing their values. Commit `.asur.toml` and `.env.example`; keep real `.env` files private.
+
+```toml
+version = 1
+
+[project]
+name = "store"
+env_files = [".env", ".env.local"]
+
+[services.db]
+preset = "postgres"
+ports = [{ host_ip = "127.0.0.1", host_port = 5432, container_port = 5432, protocol = "tcp" }]
+
+[services.db.environment]
+POSTGRES_PASSWORD = "DB_PASSWORD"
+
+[services.api]
+image = "ghcr.io/example/api:1.4.0"
+depends_on = ["db"]
+```
+
+`asur dev up` starts independent services together, waits for configured readiness, then starts their dependents. Container names are deterministic (`asur-<project>-<service>`), so `status`, `logs`, and `down` operate only on that project. Use `--profile` for a smaller stack and `asur dev export` when another tool needs Compose YAML.
 
 ### Supported shells for `asur completions`
 

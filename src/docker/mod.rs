@@ -124,8 +124,22 @@ pub struct CreateContainerConfig {
     /// Whether to probe the first published TCP port for readiness. Generic
     /// images leave this disabled because Asur cannot assume their semantics.
     pub probe_readiness: bool,
+    /// Optional Docker-native command health check. TCP readiness continues to
+    /// use `probe_readiness` because it checks the published host path too.
+    pub healthcheck: Option<ContainerHealthCheck>,
+    /// Maximum time for a published TCP readiness probe.
+    pub readiness_timeout_seconds: u64,
     /// Command override (e.g. `["redis-server", "--requirepass", "secret"]`).
     pub command: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerHealthCheck {
+    pub command: Vec<String>,
+    pub interval_seconds: u64,
+    pub timeout_seconds: u64,
+    pub retries: u64,
+    pub start_period_seconds: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

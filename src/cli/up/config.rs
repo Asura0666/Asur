@@ -155,6 +155,8 @@ pub fn build_container_config(
         restart: RestartPolicy::UnlessStopped,
         pull_policy: PullPolicy::Missing,
         probe_readiness: true,
+        healthcheck: None,
+        readiness_timeout_seconds: 30,
         command,
     };
 
@@ -192,6 +194,8 @@ pub fn build_generic_config(options: GenericOptions) -> (CreateContainerConfig, 
         restart: options.restart,
         pull_policy: options.pull_policy,
         probe_readiness: false,
+        healthcheck: None,
+        readiness_timeout_seconds: 30,
         command: options.command,
     };
     let summary = LaunchSummary {

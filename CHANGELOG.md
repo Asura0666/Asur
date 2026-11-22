@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ---
 
+## [1.3.0] – 2026-11-22
+
+### Added
+
+- Versioned `.asur.toml` project environments with catalog presets, arbitrary OCI images, ports, mounts, env-key references, health checks, dependencies, pull/restart policies, and named profiles.
+- `asur init` discovery for Compose files, project env files, catalog service variables, and existing `asur-*` containers, with a review step before writing.
+- `asur dev up`, `status`, `logs`, and `down` for deterministic project-scoped containers; independent services start concurrently and dependency failures stop later startup waves.
+- Secret-safe `asur dev export` output for interoperability with Docker Compose.
+- Release automation for WinGet manifest updates and a tested `Asura0666/tap` Homebrew formula, with manual retry support after one-time publisher setup.
+
+### Security
+
+- Project manifests and generated Compose files retain environment variable references instead of copying secret values.
+- Generic images discovered from Docker prefer immutable local repository digests when Docker exposes them.
+
+---
+
 ## [1.2.0] – 2026-11-14
 
 ### Added

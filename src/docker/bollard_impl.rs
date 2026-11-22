@@ -10,8 +10,8 @@ use bollard::{
     },
     image::{CreateImageOptions, ListImagesOptions, SearchImagesOptions},
     models::{
-        ContainerSummary, HostConfig, Mount as DockerMount, MountTypeEnum, Port, PortBinding,
-        RestartPolicy, RestartPolicyNameEnum,
+        ContainerSummary, HealthConfig, HealthStatusEnum, HostConfig, Mount as DockerMount,
+        MountTypeEnum, Port, PortBinding, RestartPolicy, RestartPolicyNameEnum,
     },
 };
 use futures_util::StreamExt;
@@ -152,6 +152,55 @@ impl DockerRuntime {
             os: inspect.os.unwrap_or_default(),
             size: inspect.size.unwrap_or_default(),
         })
+    }
+
+    async fn wait_for_container_health(
+        &self,
+        config: &CreateContainerConfig,
+        events: tokio::sync::mpsc::UnboundedSender<OperationEvent>,
+    ) -> Result<()> {
+        use tokio::time::{Duration, Instant, sleep};
+
+        let health = config
+            .healthcheck
+            .as_ref()
+            .expect("health wait requires a health check");
+        let deadline_seconds = health
+            .start_period_seconds
+            .saturating_add(
+                health
+                    .interval_seconds
+                    .saturating_add(health.timeout_seconds)
+                    .saturating_mul(health.retries.saturating_add(1)),
+            )
+            .max(30);
+        let deadline = Instant::now() + Duration::from_secs(deadline_seconds);
+        let _ = events.send(OperationEvent::stage(
+            OperationStatus::WaitingForReadiness,
+            format!("waiting for Docker health check on {}", config.name),
+        ));
+        loop {
+            let inspect = self
+                .docker
+                .inspect_container(&config.name, None)
+                .await
+                .map_err(format_docker_error)?;
+            let status = inspect
+                .state
+                .and_then(|state| state.health)
+                .and_then(|health| health.status);
+            match status {
+                Some(HealthStatusEnum::HEALTHY) => return Ok(()),
+                Some(HealthStatusEnum::UNHEALTHY) => {
+                    bail!("container `{}` failed its Docker health check", config.name)
+                }
+                _ if Instant::now() >= deadline => bail!(
+                    "container `{}` did not become healthy within {deadline_seconds} seconds",
+                    config.name
+                ),
+                _ => sleep(Duration::from_millis(500)).await,
+            }
+        }
     }
 }
 
@@ -410,6 +459,18 @@ impl ContainerRuntime for DockerRuntime {
                 Some(config.env)
             },
             cmd: config.command,
+            healthcheck: config.healthcheck.as_ref().map(|health| HealthConfig {
+                test: Some(
+                    std::iter::once("CMD".to_string())
+                        .chain(health.command.iter().cloned())
+                        .collect(),
+                ),
+                interval: Some(seconds_to_nanoseconds(health.interval_seconds)),
+                timeout: Some(seconds_to_nanoseconds(health.timeout_seconds)),
+                retries: Some(health.retries.min(i64::MAX as u64) as i64),
+                start_period: Some(seconds_to_nanoseconds(health.start_period_seconds)),
+                start_interval: None,
+            }),
             exposed_ports,
             host_config: Some(host_config),
             ..Default::default()
@@ -478,6 +539,10 @@ impl ContainerRuntime for DockerRuntime {
             self.wait_for_readiness(&readiness_config, events.clone())
                 .await?;
         }
+        if readiness_config.healthcheck.is_some() {
+            self.wait_for_container_health(&readiness_config, events.clone())
+                .await?;
+        }
 
         let info = ContainerInfo {
             name: config.name,
@@ -524,7 +589,8 @@ impl ContainerRuntime for DockerRuntime {
             OperationStatus::WaitingForReadiness,
             format!("waiting for service to listen on 127.0.0.1:{host_port}"),
         ));
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let timeout_seconds = config.readiness_timeout_seconds.max(1);
+        let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
         loop {
             match timeout(
                 Duration::from_secs(1),
@@ -535,8 +601,8 @@ impl ContainerRuntime for DockerRuntime {
                 Ok(Ok(_)) => return Ok(()),
                 _ if Instant::now() >= deadline => {
                     anyhow::bail!(
-                        "container `{}` started but the service did not accept TCP connections on port {host_port} within 30 seconds",
-                        config.name
+                        "container `{}` started but the service did not accept TCP connections on port {host_port} within {timeout_seconds} seconds",
+                        config.name,
                     );
                 }
                 _ => sleep(Duration::from_millis(250)).await,
@@ -744,6 +810,10 @@ fn to_docker_restart_policy(policy: AsurRestartPolicy) -> RestartPolicy {
         name: Some(name),
         maximum_retry_count,
     }
+}
+
+fn seconds_to_nanoseconds(seconds: u64) -> i64 {
+    seconds.saturating_mul(1_000_000_000).min(i64::MAX as u64) as i64
 }
 
 #[derive(Debug, Default, Deserialize)]

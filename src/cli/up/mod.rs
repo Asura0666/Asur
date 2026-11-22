@@ -1491,6 +1491,8 @@ mod tests {
             restart: RestartPolicy::UnlessStopped,
             pull_policy: PullPolicy::Missing,
             probe_readiness: true,
+            healthcheck: None,
+            readiness_timeout_seconds: 30,
             command: None,
         };
         let info = runtime.run_container(config).await.unwrap();

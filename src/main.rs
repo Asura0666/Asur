@@ -2,6 +2,7 @@ mod catalog;
 mod cli;
 mod docker;
 mod env;
+mod project;
 mod scan;
 mod ui;
 mod util;

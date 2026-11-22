@@ -165,3 +165,11 @@ jobs:
         run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  publish-package-managers:
+    name: Publish WinGet and Homebrew updates
+    needs: release
+    uses: ./.github/workflows/distribution.yml
+    with:
+      version: ${{ github.ref_name }}
+    secrets: inherit
