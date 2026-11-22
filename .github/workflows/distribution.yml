@@ -1,4 +1,4 @@
-name: Publish package managers
+name: Publish WinGet
 
 on:
   workflow_call:
@@ -11,10 +11,6 @@ on:
         description: Submit the WinGet update
         default: true
         type: boolean
-      publish_homebrew:
-        description: Update the Homebrew tap
-        default: true
-        type: boolean
   workflow_dispatch:
     inputs:
       version:
@@ -23,10 +19,6 @@ on:
         type: string
       publish_winget:
         description: Submit the WinGet update
-        default: true
-        type: boolean
-      publish_homebrew:
-        description: Update the Homebrew tap
         default: true
         type: boolean
 
@@ -73,87 +65,3 @@ jobs:
             --version $env:VERSION `
             --token $env:WINGET_TOKEN `
             --submit
-
-  homebrew:
-    name: Update Homebrew tap
-    runs-on: macos-latest
-    env:
-      RAW_VERSION: ${{ inputs.version }}
-      PUBLISH_HOMEBREW: ${{ inputs.publish_homebrew }}
-      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-    steps:
-      - name: Explain skipped Homebrew publication
-        if: env.PUBLISH_HOMEBREW == 'true' && env.TAP_TOKEN == ''
-        run: |
-          echo "Homebrew publication skipped: create Asura0666/homebrew-tap and add the HOMEBREW_TAP_TOKEN repository secret." >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Validate release version
-        if: env.PUBLISH_HOMEBREW == 'true' && env.TAP_TOKEN != ''
-        run: |
-          VERSION="${RAW_VERSION#v}"
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Invalid release version: $RAW_VERSION" >&2
-            exit 1
-          fi
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-
-      - name: Check out the Homebrew tap
-        if: env.PUBLISH_HOMEBREW == 'true' && env.TAP_TOKEN != ''
-        uses: actions/checkout@v4
-        with:
-          repository: Asura0666/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
-
-      - name: Generate formula from the immutable release source
-        if: env.PUBLISH_HOMEBREW == 'true' && env.TAP_TOKEN != ''
-        run: |
-          SOURCE_URL="https://github.com/Asura0666/Asur/archive/refs/tags/v${VERSION}.tar.gz"
-          curl --fail --location --retry 3 "$SOURCE_URL" --output "$RUNNER_TEMP/asur-source.tar.gz"
-          SHA256="$(shasum -a 256 "$RUNNER_TEMP/asur-source.tar.gz" | awk '{print $1}')"
-          mkdir -p homebrew-tap/Formula
-          cat > homebrew-tap/Formula/asur.rb <<EOF
-          class Asur < Formula
-            desc "CLI for local containers, ports, environment files, and secret scanning"
-            homepage "https://github.com/Asura0666/Asur"
-            url "$SOURCE_URL"
-            sha256 "$SHA256"
-            license any_of: ["Apache-2.0", "MIT"]
-
-            depends_on "rust" => :build
-
-            deny_network_access!
-
-            def fetch
-              system "cargo", "fetch", *std_cargo_fetch_args
-            end
-
-            def install
-              system "cargo", "install", *std_cargo_args
-            end
-
-            test do
-              assert_match version.to_s, shell_output("#{bin}/asur --version")
-            end
-          end
-          EOF
-
-      - name: Test the formula
-        if: env.PUBLISH_HOMEBREW == 'true' && env.TAP_TOKEN != ''
-        run: |
-          brew install --build-from-source ./homebrew-tap/Formula/asur.rb
-          brew test asur
-
-      - name: Publish the formula
-        if: env.PUBLISH_HOMEBREW == 'true' && env.TAP_TOKEN != ''
-        working-directory: homebrew-tap
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/asur.rb
-          if git diff --cached --quiet; then
-            echo "Formula already matches v${VERSION}."
-            exit 0
-          fi
-          git commit -m "asur ${VERSION}"
-          git push

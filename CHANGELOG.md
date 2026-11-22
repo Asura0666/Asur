@@ -14,7 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 - `asur init` discovery for Compose files, project env files, catalog service variables, and existing `asur-*` containers, with a review step before writing.
 - `asur dev up`, `status`, `logs`, and `down` for deterministic project-scoped containers; independent services start concurrently and dependency failures stop later startup waves.
 - Secret-safe `asur dev export` output for interoperability with Docker Compose.
-- Release automation for WinGet manifest updates and a tested `Asura0666/tap` Homebrew formula, with manual retry support after one-time publisher setup.
+- Release automation for WinGet manifest updates and maintainer guidance for submitting the source-built formula to official `homebrew/core`.
 
 ### Security
 

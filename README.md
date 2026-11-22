@@ -15,17 +15,16 @@ cargo install asur
 ### Via WinGet
 
 ```powershell
-winget install Asura0666.Asur
+winget install asur
 ```
 
 ### Via Homebrew
 
 ```bash
-brew tap Asura0666/tap
 brew install asur
 ```
 
-Package-manager publication requires the one-time maintainer setup documented in [PUBLISHING.md](PUBLISHING.md). Until the first WinGet submission and Homebrew tap workflow have completed, use Cargo or the release archives below.
+These commands become available after the package is accepted into the official WinGet community repository and `homebrew/core`. Maintainer submission steps are documented in [PUBLISHING.md](PUBLISHING.md); until acceptance, use Cargo or the release archives below.
 
 ### Pre-built binary
 
